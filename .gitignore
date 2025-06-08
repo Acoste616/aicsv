@@ -1,0 +1,34 @@
+# Pliki cache i skompilowane
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Środowiska wirtualne
+venv/
+env/
+.venv/
+
+# Pliki systemowe
+.DS_Store
+Thumbs.db
+
+# Pliki generowane przez aplikację
+*.log
+*.json
+*.csv
+failed_llm_responses.txt
+
+# Zmienne środowiskowe - BARDZO WAŻNE
+.env
+
+# Pliki IDE
+.idea/
+.vscode/
+
+# Sterowniki WebDriver
+/drivers/
+.wdm/
+
+# Ignore log files
+*.log 
