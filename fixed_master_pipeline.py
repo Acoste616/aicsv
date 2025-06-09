@@ -26,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from csv_cleaner_and_prep import CSVCleanerAndPrep
 from fixed_content_processor import FixedContentProcessor
 from content_extractor import ContentExtractor
+from multimodal_pipeline import MultimodalKnowledgePipeline
+from tweet_content_analyzer import TweetContentAnalyzer
 from config import PIPELINE_CONFIG, OUTPUT_CONFIG
 
 class FixedMasterPipeline:
@@ -41,6 +43,10 @@ class FixedMasterPipeline:
         self.content_processor = FixedContentProcessor()
         self.content_extractor = ContentExtractor()
         
+        # Nowe komponenty multimodalne
+        self.multimodal_pipeline = MultimodalKnowledgePipeline()
+        self.tweet_analyzer = TweetContentAnalyzer()
+        
         # Konfiguracja z config.py
         self.config = PIPELINE_CONFIG.copy()
         
@@ -51,6 +57,10 @@ class FixedMasterPipeline:
             "failed_count": 0,
             "duplicates_count": 0,
             "quality_fails": 0,
+            "images_processed": 0,
+            "threads_collected": 0,
+            "videos_analyzed": 0,
+            "multimodal_success": 0,
             "start_time": None,
             "checkpoints": [],
             "processed_urls": set(),
@@ -101,19 +111,19 @@ class FixedMasterPipeline:
             
     def process_single_entry(self, entry: Dict) -> Dict:
         """
-        Przetwarza pojedynczy wpis z CSV - NAPRAWIONE MAPOWANIE KOLUMN.
+        Przetwarza pojedynczy wpis z CSV używając MultimodalKnowledgePipeline.
         """
-        # NAPRAWKA: Poprawne mapowanie kolumn CSV
-        url = entry.get('url', '')  # Kolumna 'url' zamiast 'tweet_url'
-        original_text = entry.get('tweet_text', '')  # Kolumna 'tweet_text' zamiast 'full_text'
+        # Mapowanie kolumn CSV
+        url = entry.get('url', '')
+        original_text = entry.get('tweet_text', '')
         
         result = {
             "url": url,
             "original_text": original_text,
             "processing_time": time.time(),
             "success": False,
-            "duplicate": False,
-            "quality_check": None,
+            "multimodal_processing": False,
+            "content_statistics": {},
             "llm_result": None,
             "errors": []
         }
@@ -122,42 +132,99 @@ class FixedMasterPipeline:
         self.logger.info(f"Processing: {url[:50]}... | Text: {original_text[:50]}...")
         
         try:
-            # 1. Enhanced content extraction - uproszczone
-            content_data = self.enhance_content_extraction(url, original_text)
-            self.logger.debug(f"Extracted {content_data['extracted_length']} characters for {url[:50]}...")
-                
-            # 2. LLM Processing - NAPRAWKA: Lepsze error handling
+            # Przygotuj dane tweeta do przetwarzania multimodalnego
+            tweet_data = {
+                'url': url,
+                'content': original_text,
+                'rawContent': '',
+                # Dodaj więcej pól jeśli dostępne w CSV
+                'id': entry.get('id', ''),
+                'author': entry.get('author', ''),
+                'timestamp': entry.get('timestamp', ''),
+                'media': entry.get('media', []) if entry.get('media') else []
+            }
+            
+            # Użyj MultimodalKnowledgePipeline do kompletnego przetwarzania
             try:
-                llm_result = self.content_processor.process_single_item(
-                    url=url,
-                    tweet_text=original_text,
-                    extracted_content=content_data["content"]
-                )
+                multimodal_result = self.multimodal_pipeline.process_tweet_complete(tweet_data)
                 
-                # NAPRAWKA: Pełna walidacja llm_result
-                if llm_result is None:
-                    self.logger.warning(f"LLM zwróciło None dla {url}")
-                    result["errors"].append("LLM zwróciło None")
-                elif not isinstance(llm_result, dict):
-                    self.logger.warning(f"LLM zwróciło niepoprawny typ: {type(llm_result)}")
-                    result["errors"].append(f"LLM zwróciło {type(llm_result)} zamiast dict")
-                elif "title" not in llm_result or "category" not in llm_result:
-                    self.logger.warning(f"LLM zwróciło niekompletny JSON")
-                    result["errors"].append("Brak wymaganych pól w JSON")
-                else:
-                    # Sukces
-                    result["llm_result"] = llm_result
+                # Sprawdź czy przetwarzanie się udało
+                processing_success = multimodal_result.get('processing_metadata', {}).get('processing_success', False)
+                
+                if processing_success and multimodal_result.get('tweet_url'):
+                    # Sukces multimodalny
+                    result["llm_result"] = multimodal_result
                     result["success"] = True
+                    result["multimodal_processing"] = True
                     self.state["success_count"] += 1
-                    self.logger.info(f"SUCCESS: {url[:50]}... - Title: {llm_result.get('title', 'N/A')[:30]}...")
+                    self.state["multimodal_success"] += 1
                     
-            except Exception as llm_error:
-                result["errors"].append(f"LLM exception: {str(llm_error)}")
-                self.logger.error(f"LLM ERROR {url}: {llm_error}")
+                    # Aktualizuj statystyki na podstawie przetworzonych treści
+                    content_stats = multimodal_result.get('content_statistics', {})
+                    extracted_from = multimodal_result.get('extracted_from', {})
+                    
+                    if content_stats.get('total_images', 0) > 0:
+                        self.state["images_processed"] += content_stats['total_images']
+                    
+                    if content_stats.get('total_videos', 0) > 0:
+                        self.state["videos_analyzed"] += content_stats['total_videos']
+                    
+                    if extracted_from.get('thread_length', 0) > 1:
+                        self.state["threads_collected"] += 1
+                    
+                    result["content_statistics"] = content_stats
+                    
+                    self.logger.info(f"MULTIMODAL SUCCESS: {url[:50]}... - Title: {multimodal_result.get('title', 'N/A')[:30]}...")
+                    
+                else:
+                    # Fallback na standardowe przetwarzanie
+                    self.logger.warning(f"Multimodal processing failed for {url}, falling back to standard processing")
+                    
+                    content_data = self.enhance_content_extraction(url, original_text)
+                    
+                    llm_result = self.content_processor.process_single_item(
+                        url=url,
+                        tweet_text=original_text,
+                        extracted_content=content_data["content"]
+                    )
+                    
+                    if llm_result and isinstance(llm_result, dict) and "title" in llm_result:
+                        result["llm_result"] = llm_result
+                        result["success"] = True
+                        self.state["success_count"] += 1
+                        self.logger.info(f"FALLBACK SUCCESS: {url[:50]}... - Title: {llm_result.get('title', 'N/A')[:30]}...")
+                    else:
+                        result["errors"].append("Both multimodal and fallback processing failed")
+                        
+            except Exception as multimodal_error:
+                result["errors"].append(f"Multimodal processing exception: {str(multimodal_error)}")
+                self.logger.error(f"MULTIMODAL ERROR {url}: {multimodal_error}")
+                
+                # Fallback na standardowe przetwarzanie
+                try:
+                    content_data = self.enhance_content_extraction(url, original_text)
+                    
+                    llm_result = self.content_processor.process_single_item(
+                        url=url,
+                        tweet_text=original_text,
+                        extracted_content=content_data["content"]
+                    )
+                    
+                    if llm_result and isinstance(llm_result, dict) and "title" in llm_result:
+                        result["llm_result"] = llm_result
+                        result["success"] = True
+                        self.state["success_count"] += 1
+                        self.logger.info(f"FALLBACK SUCCESS: {url[:50]}...")
+                    else:
+                        result["errors"].append("Fallback processing also failed")
+                        
+                except Exception as fallback_error:
+                    result["errors"].append(f"Fallback processing exception: {str(fallback_error)}")
+                    self.logger.error(f"FALLBACK ERROR {url}: {fallback_error}")
                 
         except Exception as e:
-            result["errors"].append(f"Wyjątek główny: {str(e)}")
-            self.logger.error(f"ERROR {url}: {e}")
+            result["errors"].append(f"Main processing exception: {str(e)}")
+            self.logger.error(f"MAIN ERROR {url}: {e}")
             
         finally:
             result["processing_time"] = time.time() - result["processing_time"]
@@ -188,22 +255,31 @@ class FixedMasterPipeline:
         self.logger.info(f"CHECKPOINT {checkpoint_id} saved ({len(results)} results)")
         
     def generate_progress_report(self) -> str:
-        """Generuje raport postępu."""
+        """Generuje raport postępu z nowymi statystykami multimodalnymi."""
         total = self.state["processed_count"]
         success_rate = (self.state["success_count"] / total * 100) if total > 0 else 0
+        multimodal_rate = (self.state["multimodal_success"] / total * 100) if total > 0 else 0
         
         elapsed_time = time.time() - self.state["start_time"] if self.state["start_time"] else 0
         estimated_total = (elapsed_time / total * 98) if total > 0 else 0  # 98 wierszy w CSV
         remaining = estimated_total - elapsed_time
         
         return f"""
-📊 NAPRAWIONY PIPELINE - RAPORT POSTĘPU:
+📊 MULTIMODAL PIPELINE - RAPORT POSTĘPU:
 • Przetworzono: {total}/98 ({total/98*100:.1f}%)
 • Sukces: {self.state['success_count']} ({success_rate:.1f}%)
+• Multimodal sukces: {self.state['multimodal_success']} ({multimodal_rate:.1f}%)
 • Błędy: {self.state['failed_count']}
 • Duplikaty: {self.state['duplicates_count']}  
 • Problemy jakości: {self.state['quality_fails']}
-• Czas: {elapsed_time/60:.1f}min / ~{estimated_total/60:.1f}min total
+
+🎯 TREŚCI MULTIMODALNE:
+• Obrazy przetworzone: {self.state['images_processed']}
+• Nitki zebrane: {self.state['threads_collected']}
+• Wideo przeanalizowane: {self.state['videos_analyzed']}
+
+⏰ CZAS:
+• Elapsed: {elapsed_time/60:.1f}min / ~{estimated_total/60:.1f}min total
 • Pozostało: ~{remaining/60:.1f}min
         """
         
@@ -266,13 +342,22 @@ class FixedMasterPipeline:
         
         # 6. Raport końcowy
         total_time = time.time() - self.state["start_time"]
+        multimodal_rate = (self.state['multimodal_success'] / total_entries * 100) if total_entries > 0 else 0
+        
         self.logger.info(f"""
-🎉 NAPRAWIONY PIPELINE - UKOŃCZONO!
+🎉 MULTIMODAL PIPELINE - UKOŃCZONO!
 📊 Czas total: {total_time/60:.1f} minut
 ✅ Sukces: {self.state['success_count']}/{total_entries} ({self.state['success_count']/total_entries*100:.1f}%)
+🎯 Multimodal sukces: {self.state['multimodal_success']}/{total_entries} ({multimodal_rate:.1f}%)
 ❌ Błędy: {self.state['failed_count']}
 🔄 Duplikaty: {self.state['duplicates_count']}
 📉 Jakość fails: {self.state['quality_fails']}
+
+📸 TREŚCI MULTIMODALNE:
+• Obrazy przetworzone: {self.state['images_processed']}
+• Nitki zebrane: {self.state['threads_collected']}
+• Wideo przeanalizowane: {self.state['videos_analyzed']}
+
 📁 Output: {final_output}
         """)
         
@@ -280,48 +365,111 @@ class FixedMasterPipeline:
             "success": True,
             "total_processed": total_entries,
             "successful": self.state["success_count"],
+            "multimodal_successful": self.state["multimodal_success"],
             "failed": self.state["failed_count"],
             "duplicates": self.state["duplicates_count"],
             "quality_fails": self.state["quality_fails"],
+            "images_processed": self.state["images_processed"],
+            "threads_collected": self.state["threads_collected"],
+            "videos_analyzed": self.state["videos_analyzed"],
             "output_file": final_output,
             "processing_time": total_time
         }
         
     def generate_final_output(self, results: List[Dict]) -> str:
-        """Generuje końcowy plik output."""
+        """Generuje końcowy plik output z obsługą nowego formatu multimodalnego."""
         # Filtruj tylko udane rezultaty
         successful_results = []
+        multimodal_results = []
+        standard_results = []
+        
+        # Statystyki treści multimodalnych
+        total_images = 0
+        total_videos = 0
+        total_articles = 0
+        total_threads = 0
+        content_type_stats = {"article": 0, "thread": 0, "multimedia": 0, "mixed": 0}
+        
         for r in results:
             if r["success"] and r["llm_result"]:
                 entry = {
                     "url": r["url"],
                     "original_text": r["original_text"],
                     "processing_timestamp": datetime.fromtimestamp(r["processing_time"]).isoformat(),
+                    "multimodal_processing": r.get("multimodal_processing", False),
+                    "content_statistics": r.get("content_statistics", {}),
                 }
-                # Dodaj dane z LLM
-                entry.update(r["llm_result"])
+                
+                # Dodaj dane z LLM (już w nowym formacie jeśli multimodal)
+                llm_data = r["llm_result"].copy()
+                entry.update(llm_data)
+                
                 successful_results.append(entry)
+                
+                # Kategoryzuj wyniki
+                if r.get("multimodal_processing", False):
+                    multimodal_results.append(entry)
+                    
+                    # Zbieraj statystyki
+                    content_stats = r.get("content_statistics", {})
+                    total_images += content_stats.get("total_images", 0)
+                    total_videos += content_stats.get("total_videos", 0)
+                    total_articles += content_stats.get("total_articles", 0)
+                    total_threads += content_stats.get("total_threads", 0)
+                    
+                    # Statystyki typu treści
+                    content_type = llm_data.get("content_type", "unknown")
+                    if content_type in content_type_stats:
+                        content_type_stats[content_type] += 1
+                else:
+                    standard_results.append(entry)
         
-        output_file = self.output_dir / f"fixed_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        output_file = self.output_dir / f"multimodal_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         final_data = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
+                "pipeline_version": "multimodal_v1.0",
                 "total_entries": len(results),
                 "successful_entries": len(successful_results),
+                "multimodal_entries": len(multimodal_results),
+                "standard_entries": len(standard_results),
                 "processing_config": self.config,
                 "statistics": {
                     "success_rate": len(successful_results) / len(results) if results else 0,
+                    "multimodal_rate": len(multimodal_results) / len(results) if results else 0,
                     "duplicates_removed": self.state["duplicates_count"],
-                    "quality_failures": self.state["quality_fails"]
+                    "quality_failures": self.state["quality_fails"],
+                    "images_processed": self.state["images_processed"],
+                    "threads_collected": self.state["threads_collected"],
+                    "videos_analyzed": self.state["videos_analyzed"]
+                },
+                "content_analysis": {
+                    "total_images_found": total_images,
+                    "total_videos_found": total_videos,
+                    "total_articles_found": total_articles,
+                    "total_threads_found": total_threads,
+                    "content_type_distribution": content_type_stats
                 }
             },
             "entries": successful_results
         }
         
+        # Zapisz główny plik
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(final_data, f, indent=2, ensure_ascii=False)
             
+        # Zapisz oddzielne pliki dla różnych typów
+        if multimodal_results:
+            multimodal_file = self.output_dir / f"multimodal_only_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(multimodal_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "metadata": final_data["metadata"],
+                    "entries": multimodal_results
+                }, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"Multimodal results saved to: {multimodal_file}")
+        
         return str(output_file)
 
 
@@ -335,11 +483,13 @@ def main():
         print(f"❌ Plik {csv_file} nie istnieje!")
         return
         
-    print("🔧 NAPRAWIONY PIPELINE - START")
+    print("🎯 MULTIMODAL PIPELINE - START")
     result = pipeline.process_csv(csv_file)
     
     if result["success"]:
         print(f"✅ SUKCES! Przetworzono {result['successful']}/{result['total_processed']} wpisów")
+        print(f"🎯 Multimodal: {result['multimodal_successful']} wpisów")
+        print(f"📸 Obrazy: {result['images_processed']}, Nitki: {result['threads_collected']}, Wideo: {result['videos_analyzed']}")
         print(f"📁 Wynik: {result['output_file']}")
     else:
         print("❌ BŁĄD podczas przetwarzania")

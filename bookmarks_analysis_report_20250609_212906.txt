@@ -1,0 +1,28 @@
+RAPORT ANALIZY MULTIMODALNEJ - BOOKMARKS1_CLEANED.CSV
+============================================================
+
+Data analizy: 2025-06-09 21:29:06
+Plik źródłowy: bookmarks1_cleaned.csv
+Analizowane wpisy: 5 z 907
+
+📊 RAPORT ANALIZY MULTIMODALNEJ
+==================================================
+
+⏱️  Czas wykonania: 34.9s
+📝 Przetworzonych wpisów: 5
+✅ Sukces: 5
+❌ Błędy: 0
+📈 Wskaźnik sukcesu: 100.0%
+⚡ Przepustowość: 0.1 wpisów/s
+
+📋 TYPY TREŚCI:
+  📄 Artykuły: 0
+  🖼️  Obrazy: 0
+  🎬 Wideo: 0
+  🧵 Nitki: 0
+  📊 Łącznie treści: 0
+
+SZCZEGÓŁOWE STATYSTYKI:
+==============================
+Aktywne tryby: articles, ocr, threads, video
+Dostępne biblioteki: 9/9

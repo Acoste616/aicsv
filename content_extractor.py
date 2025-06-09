@@ -558,13 +558,25 @@ class ContentExtractor:
         return '\n'.join(text_parts)
 
     def extract_with_retry(self, url: str, max_retries: int = 1) -> str:
-        """Uproszczona ekstrakcja treści z URL."""
-        # Dla Twitter/X nie próbuj pobierać
-        if any(domain in url.lower() for domain in ['twitter.com', 'x.com', 't.co']):
-            self.logger.info(f"[Twitter] Pomijam ekstrakcję dla: {url}")
+        """Ekstrakcja treści z URL z obsługą rozwijania t.co linków."""
+        
+        # Krok 1: Rozwiń t.co linki do prawdziwych URL-ów
+        if 't.co' in url.lower():
+            self.logger.info(f"[t.co] Rozwijam skrócony link: {url}")
+            expanded_url = self._expand_tco_link(url)
+            if expanded_url and expanded_url != url:
+                self.logger.info(f"[t.co] Rozwinięto do: {expanded_url}")
+                url = expanded_url
+            else:
+                self.logger.warning(f"[t.co] Nie udało się rozwinąć: {url}")
+                return ""
+        
+        # Krok 2: Sprawdź czy to nadal Twitter/X po rozwinięciu
+        if any(domain in url.lower() for domain in ['twitter.com', 'x.com']):
+            self.logger.info(f"[Twitter] Pomijam ekstrakcję dla Twitter URL: {url}")
             return ""
         
-        # Prosta ekstrakcja dla innych URL
+        # Krok 3: Prosta ekstrakcja dla innych URL
         try:
             response = self.session.get(url, timeout=15)
             if response.status_code == 200:
@@ -574,11 +586,43 @@ class ContentExtractor:
                     element.decompose()
                 # Zwróć tekst
                 text = soup.get_text(separator=' ', strip=True)
+                self.logger.info(f"[Extractor] Pobrano {len(text)} znaków z {url}")
                 return text[:3000]  # Ogranicz długość
         except Exception as e:
             self.logger.warning(f"Błąd pobierania {url}: {e}")
         
         return ""
+    
+    def _expand_tco_link(self, tco_url: str) -> str:
+        """Rozwijanie t.co linków do prawdziwych URL-ów."""
+        try:
+            # Strategia 1: Użyj GET request z allow_redirects
+            response = self.session.get(tco_url, allow_redirects=True, timeout=10)
+            final_url = response.url
+            
+            if final_url != tco_url and 't.co' not in final_url:
+                self.logger.info(f"[t.co] Rozwinięto: {tco_url} -> {final_url}")
+                return final_url
+            
+            # Strategia 2: Sprawdź nagłówki Location
+            response_head = self.session.head(tco_url, allow_redirects=False, timeout=10)
+            if 'Location' in response_head.headers:
+                location = response_head.headers['Location']
+                if location != tco_url and 't.co' not in location:
+                    self.logger.info(f"[t.co] Rozwinięto przez Location: {tco_url} -> {location}")
+                    return location
+            
+            # Strategia 3: Jeśli nadal t.co, może to być link do obrazu/wideo Twitter
+            if 't.co' in final_url:
+                self.logger.info(f"[t.co] Link prowadzi do Twitter media: {final_url}")
+                return ""  # Nie próbuj ekstraktować treści z mediów Twitter
+            
+            self.logger.warning(f"[t.co] Nie udało się rozwinąć: {tco_url}")
+            return ""
+                
+        except Exception as e:
+            self.logger.error(f"[t.co] Błąd rozwijania {tco_url}: {e}")
+            return ""
 
     def close(self):
         """Bezpiecznie zamyka sterownik Selenium."""
