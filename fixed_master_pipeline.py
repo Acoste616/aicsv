@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from csv_cleaner_and_prep import CSVCleanerAndPrep
 from fixed_content_processor import FixedContentProcessor
 from content_extractor import ContentExtractor
+from config import PIPELINE_CONFIG, OUTPUT_CONFIG
 
 class FixedMasterPipeline:
     """
@@ -40,17 +41,8 @@ class FixedMasterPipeline:
         self.content_processor = FixedContentProcessor()
         self.content_extractor = ContentExtractor()
         
-        # Konfiguracja
-        self.config = {
-            "batch_size": 5,            # Zmniejszone dla stabilności
-            "checkpoint_frequency": 10,  # Częstsze checkpointy
-            "max_retries": 2,           # Mniej prób
-            "quality_threshold": 0.4,   # Niższy próg jakości
-            "enable_duplicates_check": True,
-            "enable_quality_validation": True,
-            "output_format": "json",
-            "progress_tracking": True,
-        }
+        # Konfiguracja z config.py
+        self.config = PIPELINE_CONFIG.copy()
         
         # Stan przetwarzania
         self.state = {
@@ -65,8 +57,8 @@ class FixedMasterPipeline:
             "url_hashes": set(),
         }
         
-        # Przygotuj folder outputu
-        self.output_dir = Path("fixed_output")
+        # Przygotuj folder outputu z config.py
+        self.output_dir = Path(OUTPUT_CONFIG["output_dir"])
         self.output_dir.mkdir(exist_ok=True)
         
     def setup_logging(self):
@@ -81,106 +73,29 @@ class FixedMasterPipeline:
         )
         self.logger = logging.getLogger(__name__)
         
-    def detect_duplicates(self, url: str, title: str) -> bool:
-        """
-        Wykrywa duplikaty na podstawie URL.
-        """
-        if not self.config["enable_duplicates_check"]:
-            return False
-            
-        # Prosty hash dla URL
-        url_hash = hashlib.md5(url.lower().encode()).hexdigest()
+    # Usunięte: detect_duplicates - nie używane
         
-        if url_hash in self.state["url_hashes"]:
-            self.logger.info(f"DUPLIKAT URL wykryty: {url}")
-            return True
-            
-        self.state["url_hashes"].add(url_hash)
-        return False
-        
-    def validate_content_quality(self, content: str, url: str) -> Dict:
-        """
-        Łagodniejsza walidacja jakości pobranej treści.
-        """
-        if not self.config["enable_quality_validation"]:
-            return {"valid": True, "score": 1.0, "issues": []}
-            
-        issues = []
-        score = 1.0
-        
-        # Test 1: Długość treści - bardziej tolerancyjny
-        if len(content.strip()) < 20:
-            issues.append("Treść bardzo krótka (< 20 znaków)")
-            score -= 0.4
-        elif len(content.strip()) < 50:
-            issues.append("Treść krótka (< 50 znaków)")
-            score -= 0.2
-            
-        # Test 2: Czy to nie error page - ŁAGODNIEJSZY
-        serious_error_indicators = [
-            "404 not found", "page not found", "access denied", 
-            "forbidden 403", "internal server error"
-        ]
-        content_lower = content.lower()
-        for indicator in serious_error_indicators:
-            if indicator in content_lower:
-                issues.append(f"Prawdopodobna strona błędu: {indicator}")
-                score -= 0.3
-                break
-                
-        # USUWA - słowo "error" samo w sobie nie jest problemem
-        
-        # Test 3: Bardzo powtarzalna treść - łagodniejszy
-        words = content.split()
-        if len(set(words)) < len(words) * 0.2 and len(words) > 100:
-            issues.append("Bardzo powtarzalna treść")
-            score -= 0.2
-            
-        valid = score >= self.config["quality_threshold"]
-        
-        if not valid:
-            self.logger.warning(f"JAKOŚĆ: {url} - Score: {score:.2f}, Issues: {issues}")
-        else:
-            self.logger.debug(f"JAKOŚĆ OK: {url} - Score: {score:.2f}")
-            
-        return {
-            "valid": valid,
-            "score": max(0, score),
-            "issues": issues
-        }
+    # Usunięte: validate_content_quality - nie używane
         
     def enhance_content_extraction(self, url: str, original_text: str) -> Dict:
         """
-        Ulepszona ekstrakcja treści.
+        Uproszczona ekstrakcja treści.
         """
         try:
-            # Strategia 1: Standardowy content extractor
+            # Prosta ekstrakcja
             extracted_content = self.content_extractor.extract_with_retry(url)
             
-            # Strategia 2: Walidacja jakości
-            quality = self.validate_content_quality(extracted_content, url)
-            
-            # Kombinuj oryginalna treść tweeta + extracted content
-            combined_content = f"""
-ORYGINAŁ TWEETA: {original_text}
-
-SZCZEGÓŁOWA TREŚĆ ZE STRONY:
-{extracted_content}
-            """.strip()
-            
             return {
-                "content": combined_content,
-                "extracted_length": len(extracted_content),
-                "quality": quality,
+                "content": extracted_content if extracted_content else original_text,
+                "extracted_length": len(extracted_content) if extracted_content else 0,
                 "url": url
             }
             
         except Exception as e:
             self.logger.error(f"Błąd ekstrakcji {url}: {e}")
             return {
-                "content": f"ORYGINAŁ TWEETA: {original_text}",  # Fallback
+                "content": original_text,  # Fallback na tweet
                 "extracted_length": 0,
-                "quality": {"valid": True, "score": 0.5, "issues": ["Fallback na tweet"]},
                 "url": url
             }
             
@@ -207,24 +122,11 @@ SZCZEGÓŁOWA TREŚĆ ZE STRONY:
         self.logger.info(f"Processing: {url[:50]}... | Text: {original_text[:50]}...")
         
         try:
-            # 1. Check duplicates
-            if self.detect_duplicates(url, original_text):
-                result["duplicate"] = True
-                self.state["duplicates_count"] += 1
-                return result
-                
-            # 2. Enhanced content extraction
+            # 1. Enhanced content extraction - uproszczone
             content_data = self.enhance_content_extraction(url, original_text)
-            result["quality_check"] = content_data["quality"]
-            
-            # 3. Quality validation
-            if not content_data["quality"]["valid"]:
-                result["errors"].append("Nie przeszło walidacji jakości")
-                self.state["quality_fails"] += 1
-                # NIE RETURN - spróbuj z LLM mimo to, może się uda
-                self.logger.warning(f"Quality fail but continuing: {url}")
+            self.logger.debug(f"Extracted {content_data['extracted_length']} characters for {url[:50]}...")
                 
-            # 4. LLM Processing - NAPRAWKA: Lepsze error handlinge
+            # 2. LLM Processing - NAPRAWKA: Lepsze error handling
             try:
                 llm_result = self.content_processor.process_single_item(
                     url=url,
@@ -232,18 +134,22 @@ SZCZEGÓŁOWA TREŚĆ ZE STRONY:
                     extracted_content=content_data["content"]
                 )
                 
-                # NAPRAWKA: Sprawdź czy llm_result nie jest None
+                # NAPRAWKA: Pełna walidacja llm_result
                 if llm_result is None:
+                    self.logger.warning(f"LLM zwróciło None dla {url}")
                     result["errors"].append("LLM zwróciło None")
-                elif isinstance(llm_result, dict) and "error" in llm_result:
-                    result["errors"].append(f"LLM błąd: {llm_result['error']}")
-                elif isinstance(llm_result, dict):
+                elif not isinstance(llm_result, dict):
+                    self.logger.warning(f"LLM zwróciło niepoprawny typ: {type(llm_result)}")
+                    result["errors"].append(f"LLM zwróciło {type(llm_result)} zamiast dict")
+                elif "title" not in llm_result or "category" not in llm_result:
+                    self.logger.warning(f"LLM zwróciło niekompletny JSON")
+                    result["errors"].append("Brak wymaganych pól w JSON")
+                else:
+                    # Sukces
                     result["llm_result"] = llm_result
                     result["success"] = True
                     self.state["success_count"] += 1
-                    self.logger.info(f"SUCCESS: {url[:50]}...")
-                else:
-                    result["errors"].append(f"LLM zwróciło nieprawidłowy format: {type(llm_result)}")
+                    self.logger.info(f"SUCCESS: {url[:50]}... - Title: {llm_result.get('title', 'N/A')[:30]}...")
                     
             except Exception as llm_error:
                 result["errors"].append(f"LLM exception: {str(llm_error)}")

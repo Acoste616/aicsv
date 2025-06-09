@@ -557,30 +557,26 @@ class ContentExtractor:
         
         return '\n'.join(text_parts)
 
-    def extract_with_retry(self, url: str, max_retries: int = 3) -> str:
-        """Próbuje pobrać treść z inteligentnym retry i rotacją UA."""
-        for attempt in range(max_retries):
-            try:
-                # Losowe opóźnienie między próbami
-                if attempt > 0:
-                    delay = random.uniform(3, 8) * (attempt + 1)  # Dłuższe opóźnienia
-                    self.logger.info(f"[Retry] Czekam {delay:.1f}s przed próbą {attempt + 1}")
-                    time.sleep(delay)
-                
-                content = self.get_webpage_content(url)
-                
-                # Obniżony próg akceptacji - nawet częściowa treść może być użyteczna
-                if content and len(content) > 50:  # Z 100 na 50
-                    if not self._is_bot_blocked(content):
-                        return content
-                    elif len(content) > 100:  # Nawet zablokowana może być użyteczna
-                        self.logger.warning(f"[Retry] Używam treści mimo blokady ({len(content)} znaków)")
-                        return content
-                
-                self.logger.warning(f"[Retry] Próba {attempt + 1} nieudana: {len(content) if content else 0} znaków")
-                
-            except Exception as e:
-                self.logger.error(f"[Retry] Błąd w próbie {attempt + 1}: {e}")
+    def extract_with_retry(self, url: str, max_retries: int = 1) -> str:
+        """Uproszczona ekstrakcja treści z URL."""
+        # Dla Twitter/X nie próbuj pobierać
+        if any(domain in url.lower() for domain in ['twitter.com', 'x.com', 't.co']):
+            self.logger.info(f"[Twitter] Pomijam ekstrakcję dla: {url}")
+            return ""
+        
+        # Prosta ekstrakcja dla innych URL
+        try:
+            response = self.session.get(url, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'lxml')
+                # Usuń niepotrzebne elementy
+                for element in soup(["script", "style", "nav", "footer"]):
+                    element.decompose()
+                # Zwróć tekst
+                text = soup.get_text(separator=' ', strip=True)
+                return text[:3000]  # Ogranicz długość
+        except Exception as e:
+            self.logger.warning(f"Błąd pobierania {url}: {e}")
         
         return ""
 

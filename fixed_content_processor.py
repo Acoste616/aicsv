@@ -15,6 +15,7 @@ import re
 import requests
 import logging
 from typing import Dict, List, Optional
+from config import LLM_CONFIG, EXTRACTION_CONFIG
 
 class FixedContentProcessor:
     """
@@ -23,75 +24,39 @@ class FixedContentProcessor:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        self.api_url = "http://localhost:1234/v1/chat/completions"
-        
-        # Konfiguracja LLM
-        self.llm_config = {
-            "model_name": "mistralai/mistral-7b-instruct-v0.3",
-            "temperature": 0.1,
-            "max_tokens": 1000,
-            "timeout": 120  # Więcej czasu
-        }
+        self.llm_config = LLM_CONFIG.copy()
+        self.api_url = self.llm_config["api_url"]
 
     def create_smart_prompt(self, url: str, tweet_text: str, extracted_content: str = "") -> str:
-        """
-        Tworzy inteligentny prompt z fallback strategies.
-        """
+        """Uproszczony prompt do minimum."""
+        # Przygotuj dane
+        data = f"Tweet: {tweet_text}"
+        if extracted_content and len(extracted_content) > 50:
+            data += f"\nDodatkowa treść: {extracted_content[:500]}"
         
-        # Określ długość wyciągniętej treści
-        content_length = len(extracted_content.strip())
-        
-        # Przygotuj kontekst w zależności od dostępnych danych
-        if content_length > 200:
-            # Mamy dużo danych
-            context = f"""
-ORYGINALNY TWEET: {tweet_text}
+        prompt = f'''Przeanalizuj poniższe dane i zwróć TYLKO poprawny JSON (bez żadnego dodatkowego tekstu):
 
-SZCZEGÓŁOWA TREŚĆ ZE STRONY:
-{extracted_content[:1500]}...
-"""
-            instruction = "Masz bogate informacje. Stwórz szczegółową analizę."
-            
-        elif content_length > 50:
-            # Mamy średnio danych
-            context = f"""
-ORYGINALNY TWEET: {tweet_text}
+{data}
 
-TREŚĆ ZE STRONY:
-{extracted_content}
-"""
-            instruction = "Masz podstawowe informacje. Zrób realistyczną analizę."
-            
-        else:
-            # Mamy tylko tweet
-            context = f"""
-ORYGINALNY TWEET: {tweet_text}
-
-DODATKOWE INFO: Nie udało się pobrać szczegółowej treści ze strony.
-"""
-            instruction = "Masz tylko tweet. Przeanalizuj go i wywnioskuj co możesz na podstawie dostępnych informacji."
-
-        prompt = f"""Przeanalizuj poniższą treść i stwórz JSON z kategoryzacją.
-
-{instruction}
-
-DANE DO ANALIZY:
-{context}
-
-WYMAGANY FORMAT JSON (WAŻNE: tylko czysty JSON, bez komentarzy):
+Zwróć dokładnie taki format JSON:
 {{
-    "title": "Krótki, opisowy tytuł (max 100 znaków)",
-    "short_description": "Zwięzły opis w 1-2 zdaniach",
-    "detailed_description": "Szczegółowy opis do 300 słów",
-    "category": "AI/Machine Learning lub Biznes lub Rozwój Osobisty lub Technologia lub Inne",
-    "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-    "estimated_time": "Czas czytania/oglądania jeśli da się określić",
-    "content_type": "tweet/article/video/webpage",
-    "key_points": ["punkt1", "punkt2", "punkt3"]
+    "title": "Krótki tytuł do 10 słów",
+    "short_description": "Opis w 1-2 zdaniach",
+    "category": "Technologia",
+    "tags": ["tag1", "tag2", "tag3"],
+    "url": "{url}"
 }}
 
-TYLKO JSON:"""
+Przykład poprawnej odpowiedzi:
+{{
+    "title": "Budowanie systemów RAG z LangChain",
+    "short_description": "Przewodnik pokazuje jak tworzyć systemy RAG używając LangChain z fokusem na strategie podziału tekstu.",
+    "category": "Technologia",
+    "tags": ["RAG", "LangChain", "AI"],
+    "url": "https://example.com"
+}}
 
+JSON:'''
         return prompt
 
     def _call_llm(self, prompt: str) -> Optional[str]:
@@ -133,7 +98,7 @@ TYLKO JSON:"""
             return None
 
     def _extract_json_from_response(self, response: str) -> Optional[Dict]:
-        """Ulepszone wyciąganie JSON z odpowiedzi LLM."""
+        """Uproszczone wyciąganie JSON z odpowiedzi LLM."""
         if not response:
             self.logger.error("Empty response from LLM")
             return None
@@ -145,29 +110,16 @@ TYLKO JSON:"""
             except:
                 pass
                 
-            # Strategia 2: JSON w bloku ```json```
-            json_pattern = r'```json\s*(\{.*?\})\s*```'
-            match = re.search(json_pattern, response, re.DOTALL)
-            if match:
-                return json.loads(match.group(1))
-                
-            # Strategia 3: JSON w bloku ```
-            json_pattern = r'```\s*(\{.*?\})\s*```'
-            match = re.search(json_pattern, response, re.DOTALL)
-            if match:
-                return json.loads(match.group(1))
-                
-            # Strategia 4: Znajdź największy blok JSON
-            json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-            matches = re.findall(json_pattern, response, re.DOTALL)
-            
-            for match in sorted(matches, key=len, reverse=True):
+            # Strategia 2: Szukaj między { i }
+            start = response.find('{')
+            end = response.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = response[start:end+1]
                 try:
-                    return json.loads(match)
+                    return json.loads(json_str)
                 except:
-                    continue
+                    pass
                     
-            # Strategia 5: Fallback - spróbuj znaleźć choćby fragment
             self.logger.warning(f"Could not parse JSON from response: {response[:200]}...")
             return None
             
@@ -178,16 +130,12 @@ TYLKO JSON:"""
     def _create_fallback_result(self, url: str, tweet_text: str) -> Dict:
         """Tworzy fallback result gdy LLM zawiedzie."""
         return {
-            "title": tweet_text[:80] + "..." if len(tweet_text) > 80 else tweet_text,
+            "title": tweet_text[:50] + "..." if len(tweet_text) > 50 else tweet_text,
             "short_description": "Analiza automatyczna na podstawie tweeta",
-            "detailed_description": f"Tweet: {tweet_text}. Nie udało się przeprowadzić pełnej analizy.",
             "category": "Inne",
             "tags": ["tweet", "automatyczna"],
-            "estimated_time": "1 min",
-            "content_type": "tweet",
-            "key_points": [tweet_text[:100]],
-            "fallback": True,
-            "source_url": url
+            "url": url,
+            "fallback": True
         }
 
     def process_single_item(self, url: str, tweet_text: str = "", extracted_content: str = "") -> Optional[Dict]:
@@ -215,14 +163,13 @@ TYLKO JSON:"""
                 return self._create_fallback_result(url, tweet_text)
                 
             # Krok 4: Waliduj wynik
-            required_fields = ["title", "short_description", "category"]
+            required_fields = ["title", "short_description", "category", "tags", "url"]
             for field in required_fields:
                 if field not in analysis:
                     self.logger.warning(f"Missing field {field} in LLM response for {url}")
-                    analysis[field] = f"Brak {field}"
+                    analysis[field] = f"Brak {field}" if field != "tags" else []
                     
             # Dodaj metadata
-            analysis["source_url"] = url
             analysis["processing_success"] = True
             
             self.logger.info(f"Successfully processed: {url[:50]}...")
