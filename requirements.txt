@@ -7,4 +7,9 @@ transformers
 torch
 lxml
 selenium
-webdriver-manager 
+webdriver-manager
+streamlit
+plotly
+wordcloud
+openpyxl
+notion-client 
