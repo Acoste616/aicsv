@@ -7,4 +7,8 @@ transformers
 torch
 lxml
 selenium
-webdriver-manager 
+webdriver-manager
+tiktoken
+google-generativeai
+anthropic
+openai 
