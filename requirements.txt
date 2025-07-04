@@ -7,4 +7,5 @@ transformers
 torch
 lxml
 selenium
-webdriver-manager 
+webdriver-manager
+tqdm 
