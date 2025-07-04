@@ -7,4 +7,9 @@ transformers
 torch
 lxml
 selenium
-webdriver-manager 
+webdriver-manager
+openai>=1.0.0
+anthropic>=0.18.0
+google-generativeai>=0.3.0
+tenacity>=8.2.0
+ratelimit>=2.2.1 
