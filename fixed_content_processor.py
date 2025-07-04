@@ -8,6 +8,14 @@ NAPRAWIONE PROBLEMY:
 2. None handling - sprawdzanie czy LLM zwróciło cokolwiek
 3. Error handling - lepsza obsługa błędów
 4. Fallback strategies - działanie nawet przy problemach z ekstrcją
+
+NOWE FUNKCJE:
+1. Obsługa wielu providerów cloud API (OpenAI, Anthropic, Google)
+2. Kompatybilność wsteczna z lokalnym LLM
+3. Konfiguracja przez zmienne środowiskowe
+4. Retry logic z exponential backoff
+5. Rate limiting
+6. Cache responses
 """
 
 import json
@@ -15,23 +23,308 @@ import re
 import requests
 import logging
 import hashlib
+import time
+import random
+import threading
+import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from config import LLM_CONFIG, EXTRACTION_CONFIG
+
+
+class RateLimiter:
+    """Rate limiter dla API calls z różnymi limitami dla różnych providerów."""
+    
+    def __init__(self, requests_per_minute: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.requests = []
+        self.lock = threading.Lock()
+    
+    def acquire(self):
+        """Czeka aż będzie możliwe wykonanie requestu."""
+        with self.lock:
+            now = time.time()
+            # Usuń stare requesty (starsze niż 1 minuta)
+            self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+            
+            if len(self.requests) >= self.requests_per_minute:
+                # Oblicz czas do czekania
+                oldest_request = min(self.requests)
+                wait_time = 60 - (now - oldest_request)
+                if wait_time > 0:
+                    time.sleep(wait_time)
+                    # Aktualizuj listę po czekaniu
+                    now = time.time()
+                    self.requests = [req_time for req_time in self.requests if now - req_time < 60]
+            
+            self.requests.append(now)
+
+
+class CloudAPIProvider:
+    """Bazowa klasa dla providerów cloud API."""
+    
+    def __init__(self, api_key: str, rate_limit: int = 60):
+        self.api_key = api_key
+        self.rate_limiter = RateLimiter(rate_limit)
+        self.logger = logging.getLogger(__name__)
+    
+    def make_request(self, prompt: str, **kwargs) -> Optional[str]:
+        """Implementacja specyficzna dla providera."""
+        raise NotImplementedError
+    
+    def _retry_with_backoff(self, func, max_retries: int = 3, *args, **kwargs) -> Optional[str]:
+        """Implementuje retry logic z exponential backoff."""
+        for attempt in range(max_retries):
+            try:
+                self.rate_limiter.acquire()
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    self.logger.error(f"Final attempt failed: {e}")
+                    return None
+                
+                # Exponential backoff z jitter
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                self.logger.warning(f"Attempt {attempt + 1} failed: {e}, retrying in {wait_time:.2f}s")
+                time.sleep(wait_time)
+        
+        return None
+
+
+class OpenAIProvider(CloudAPIProvider):
+    """Provider dla OpenAI API."""
+    
+    def __init__(self, api_key: str, model: str = "gpt-3.5-turbo"):
+        super().__init__(api_key, rate_limit=60)  # 60 requests per minute for tier 1
+        self.model = model
+        self.api_url = "https://api.openai.com/v1/chat/completions"
+    
+    def make_request(self, prompt: str, **kwargs) -> Optional[str]:
+        """Wykonuje request do OpenAI API."""
+        def _make_request():
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": kwargs.get("temperature", 0.1),
+                "max_tokens": kwargs.get("max_tokens", 2000)
+            }
+            
+            response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=kwargs.get("timeout", 30)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+                else:
+                    self.logger.error("OpenAI response missing choices")
+                    return None
+            else:
+                self.logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+                raise Exception(f"OpenAI API error: {response.status_code}")
+        
+        return self._retry_with_backoff(_make_request)
+
+
+class AnthropicProvider(CloudAPIProvider):
+    """Provider dla Anthropic Claude API."""
+    
+    def __init__(self, api_key: str, model: str = "claude-3-haiku-20240307"):
+        super().__init__(api_key, rate_limit=50)  # 50 requests per minute
+        self.model = model
+        self.api_url = "https://api.anthropic.com/v1/messages"
+    
+    def make_request(self, prompt: str, **kwargs) -> Optional[str]:
+        """Wykonuje request do Anthropic API."""
+        def _make_request():
+            headers = {
+                "x-api-key": self.api_key,
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01"
+            }
+            
+            payload = {
+                "model": self.model,
+                "max_tokens": kwargs.get("max_tokens", 2000),
+                "temperature": kwargs.get("temperature", 0.1),
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            
+            response = requests.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+                timeout=kwargs.get("timeout", 30)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "content" in result and len(result["content"]) > 0:
+                    return result["content"][0]["text"]
+                else:
+                    self.logger.error("Anthropic response missing content")
+                    return None
+            else:
+                self.logger.error(f"Anthropic API error: {response.status_code} - {response.text}")
+                raise Exception(f"Anthropic API error: {response.status_code}")
+        
+        return self._retry_with_backoff(_make_request)
+
+
+class GoogleProvider(CloudAPIProvider):
+    """Provider dla Google Gemini API."""
+    
+    def __init__(self, api_key: str, model: str = "gemini-pro"):
+        super().__init__(api_key, rate_limit=60)  # 60 requests per minute
+        self.model = model
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    
+    def make_request(self, prompt: str, **kwargs) -> Optional[str]:
+        """Wykonuje request do Google Gemini API."""
+        def _make_request():
+            headers = {"Content-Type": "application/json"}
+            
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": kwargs.get("temperature", 0.1),
+                    "maxOutputTokens": kwargs.get("max_tokens", 2000)
+                }
+            }
+            
+            response = requests.post(
+                f"{self.api_url}?key={self.api_key}",
+                headers=headers,
+                json=payload,
+                timeout=kwargs.get("timeout", 30)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "candidates" in result and len(result["candidates"]) > 0:
+                    candidate = result["candidates"][0]
+                    if "content" in candidate and "parts" in candidate["content"]:
+                        return candidate["content"]["parts"][0]["text"]
+                else:
+                    self.logger.error("Google response missing candidates")
+                    return None
+            else:
+                self.logger.error(f"Google API error: {response.status_code} - {response.text}")
+                raise Exception(f"Google API error: {response.status_code}")
+        
+        return self._retry_with_backoff(_make_request)
+
+
+class LocalLLMProvider:
+    """Provider dla lokalnego LLM (zachowuje kompatybilność wsteczną)."""
+    
+    def __init__(self, api_url: str, model_name: str):
+        self.api_url = api_url
+        self.model_name = model_name
+        self.logger = logging.getLogger(__name__)
+    
+    def make_request(self, prompt: str, **kwargs) -> Optional[str]:
+        """Wykonuje request do lokalnego LLM."""
+        try:
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": kwargs.get("temperature", 0.1),
+                "max_tokens": kwargs.get("max_tokens", 2000)
+            }
+            
+            response = requests.post(
+                self.api_url,
+                json=payload,
+                timeout=kwargs.get("timeout", 45)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    return result["choices"][0]["message"]["content"]
+                else:
+                    self.logger.error("Local LLM response missing choices")
+                    return None
+            else:
+                self.logger.error(f"Local LLM API error: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Local LLM call error: {e}")
+            return None
+
 
 class FixedContentProcessor:
     """
     Naprawiona klasa do przetwarzania treści z lepszym error handling i cachingiem.
+    Obsługuje zarówno lokalne LLM jak i cloud APIs.
     """
     
-    def __init__(self):
+    def __init__(self, provider: str = None, api_key: str = None, model: str = None):
+        """
+        Inicjalizuje processor z wybranym providerem.
+        
+        Args:
+            provider: "openai", "anthropic", "google", "local" lub None (auto-detect z env)
+            api_key: Klucz API dla cloud providera
+            model: Model do użycia (opcjonalnie)
+        """
         self.logger = logging.getLogger(__name__)
+        
+        # Zachowaj kompatybilność wsteczną z konfiguracją lokalną
         self.llm_config = LLM_CONFIG.copy()
-        self.api_url = self.llm_config["api_url"]
+        
+        # Konfiguracja z zmiennych środowiskowych lub parametrów
+        self.provider = provider or os.getenv("LLM_PROVIDER", "local")
+        self.api_key = api_key or os.getenv("API_KEY")
+        self.model = model
+        
+        # Inicjalizuj providera
+        self.llm_provider = self._initialize_provider()
         
         # Cache dla LLM
-        self.cache_file = Path("cache_llm.json")
+        self.cache_file = Path(f"cache_llm_{self.provider}.json")
         self.llm_cache = self._load_cache()
+        
+        self.logger.info(f"Initialized FixedContentProcessor with provider: {self.provider}")
+    
+    def _initialize_provider(self) -> Union[CloudAPIProvider, LocalLLMProvider]:
+        """Inicjalizuje odpowiedniego providera API."""
+        if self.provider == "openai":
+            if not self.api_key:
+                raise ValueError("OpenAI API key is required. Set API_KEY environment variable.")
+            model = self.model or "gpt-3.5-turbo"
+            return OpenAIProvider(self.api_key, model)
+        
+        elif self.provider == "anthropic":
+            if not self.api_key:
+                raise ValueError("Anthropic API key is required. Set API_KEY environment variable.")
+            model = self.model or "claude-3-haiku-20240307"
+            return AnthropicProvider(self.api_key, model)
+        
+        elif self.provider == "google":
+            if not self.api_key:
+                raise ValueError("Google API key is required. Set API_KEY environment variable.")
+            model = self.model or "gemini-pro"
+            return GoogleProvider(self.api_key, model)
+        
+        elif self.provider == "local":
+            api_url = self.llm_config.get("api_url", "http://localhost:1234/v1/chat/completions")
+            model_name = self.llm_config.get("model_name", "local-model")
+            return LocalLLMProvider(api_url, model_name)
+        
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}. Use 'openai', 'anthropic', 'google', or 'local'.")
 
     def _load_cache(self) -> Dict:
         """Ładuje cache z pliku"""
@@ -52,8 +345,9 @@ class FixedContentProcessor:
             self.logger.warning(f"Nie udało się zapisać cache: {e}")
     
     def _get_cache_key(self, prompt: str) -> str:
-        """Tworzy klucz cache dla prompta"""
-        return hashlib.md5(prompt.encode('utf-8')).hexdigest()
+        """Tworzy klucz cache dla prompta (uwzględnia providera)"""
+        cache_string = f"{self.provider}:{prompt}"
+        return hashlib.md5(cache_string.encode('utf-8')).hexdigest()
     
     def _should_skip_processing(self, tweet_text: str, url: str) -> bool:
         """Sprawdza czy można pominąć przetwarzanie dla krótkich tweetów bez treści"""
@@ -167,43 +461,28 @@ JSON:'''
             return self.llm_cache[cache_key]
         
         try:
-            payload = {
-                "model": self.llm_config["model_name"],
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.llm_config["temperature"],
-                "max_tokens": self.llm_config["max_tokens"]
-            }
+            self.logger.debug(f"Calling {self.provider} LLM with prompt length: {len(prompt)}")
             
-            self.logger.debug(f"Calling LLM with prompt length: {len(prompt)}")
-            
-            response = requests.post(
-                self.api_url, 
-                json=payload, 
-                timeout=self.llm_config["timeout"]
+            # Wywołaj odpowiedniego providera
+            response = self.llm_provider.make_request(
+                prompt,
+                temperature=self.llm_config.get("temperature", 0.1),
+                max_tokens=self.llm_config.get("max_tokens", 2000),
+                timeout=self.llm_config.get("timeout", 30)
             )
             
-            if response.status_code == 200:
-                result = response.json()
-                if "choices" in result and len(result["choices"]) > 0:
-                    content = result["choices"][0]["message"]["content"]
-                    self.logger.debug(f"LLM response length: {len(content) if content else 0}")
-                    
-                    # Zapisz do cache
-                    if content:
-                        self.llm_cache[cache_key] = content
-                        self._save_cache()
-                    
-                    return content
-                else:
-                    self.logger.error("LLM response missing choices")
-                    return None
+            if response:
+                self.logger.debug(f"LLM response length: {len(response)}")
+                
+                # Zapisz do cache
+                self.llm_cache[cache_key] = response
+                self._save_cache()
+                
+                return response
             else:
-                self.logger.error(f"LLM API error: {response.status_code} - {response.text}")
+                self.logger.error(f"LLM returned empty response")
                 return None
                 
-        except requests.exceptions.Timeout:
-            self.logger.error("LLM timeout")
-            return None
         except Exception as e:
             self.logger.error(f"LLM call error: {e}")
             return None
@@ -510,28 +789,132 @@ JSON:'''
 # Test function
 def test_fixed_processing():
     """Test naprawionego procesora."""
-    processor = FixedContentProcessor()
+    print("=== TEST FIXED PROCESSING ===")
+    print("Testowanie różnych providerów...\n")
     
     # Test z przykładem z CSV
     test_url = "https://x.com/aaditsh/status/1931041095317688786"
     test_tweet = "How to build an app from scratch using the latest AI workflows (76 mins)"
     test_content = "Some extracted content from the webpage..."
     
-    print("=== TEST FIXED PROCESSING ===")
     print(f"URL: {test_url}")
     print(f"Tweet: {test_tweet}")
+    print()
     
-    result = processor.process_single_item(test_url, test_tweet, test_content)
+    # Test 1: Local LLM (domyślny)
+    print("1. Test z lokalnym LLM...")
+    try:
+        processor_local = FixedContentProcessor()
+        result_local = processor_local.process_single_item(test_url, test_tweet, test_content)
+        
+        if result_local:
+            print("✅ WYNIK ANALIZY (Local LLM):")
+            print(json.dumps(result_local, indent=2, ensure_ascii=False))
+        else:
+            print("❌ ANALIZA NIEUDANA (Local LLM)")
+        
+        processor_local.close()
+    except Exception as e:
+        print(f"❌ Error z lokalnym LLM: {e}")
     
-    if result:
-        print("\n✅ WYNIK ANALIZY:")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        print(f"\nTyp wyniku: {type(result)}")
-        print(f"Czy ma 'title': {'title' in result}")
-    else:
-        print("❌ ANALIZA NIEUDANA")
+    print("\n" + "="*50 + "\n")
     
-    processor.close()
+    # Test 2: OpenAI (jeśli API key jest dostępny)
+    print("2. Test z OpenAI...")
+    try:
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            processor_openai = FixedContentProcessor(provider="openai", api_key=openai_key)
+            result_openai = processor_openai.process_single_item(test_url, test_tweet, test_content)
+            
+            if result_openai:
+                print("✅ WYNIK ANALIZY (OpenAI):")
+                print(json.dumps(result_openai, indent=2, ensure_ascii=False))
+            else:
+                print("❌ ANALIZA NIEUDANA (OpenAI)")
+            
+            processor_openai.close()
+        else:
+            print("⚠️  OPENAI_API_KEY nie jest ustawiony - pomijanie testu")
+    except Exception as e:
+        print(f"❌ Error z OpenAI: {e}")
+    
+    print("\n" + "="*50 + "\n")
+    
+    # Test 3: Anthropic (jeśli API key jest dostępny)
+    print("3. Test z Anthropic...")
+    try:
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        if anthropic_key:
+            processor_anthropic = FixedContentProcessor(provider="anthropic", api_key=anthropic_key)
+            result_anthropic = processor_anthropic.process_single_item(test_url, test_tweet, test_content)
+            
+            if result_anthropic:
+                print("✅ WYNIK ANALIZY (Anthropic):")
+                print(json.dumps(result_anthropic, indent=2, ensure_ascii=False))
+            else:
+                print("❌ ANALIZA NIEUDANA (Anthropic)")
+            
+            processor_anthropic.close()
+        else:
+            print("⚠️  ANTHROPIC_API_KEY nie jest ustawiony - pomijanie testu")
+    except Exception as e:
+        print(f"❌ Error z Anthropic: {e}")
+    
+    print("\n" + "="*50 + "\n")
+    
+    # Test 4: Google (jeśli API key jest dostępny)
+    print("4. Test z Google...")
+    try:
+        google_key = os.getenv("GOOGLE_API_KEY")
+        if google_key:
+            processor_google = FixedContentProcessor(provider="google", api_key=google_key)
+            result_google = processor_google.process_single_item(test_url, test_tweet, test_content)
+            
+            if result_google:
+                print("✅ WYNIK ANALIZY (Google):")
+                print(json.dumps(result_google, indent=2, ensure_ascii=False))
+            else:
+                print("❌ ANALIZA NIEUDANA (Google)")
+            
+            processor_google.close()
+        else:
+            print("⚠️  GOOGLE_API_KEY nie jest ustawiony - pomijanie testu")
+    except Exception as e:
+        print(f"❌ Error z Google: {e}")
+    
+    print("\n" + "="*50)
+    print("INSTRUKCJE UŻYCIA:")
+    print("="*50)
+    print("# Użycie z różnymi providerami:")
+    print()
+    print("# 1. Lokalny LLM (domyślny)")
+    print("processor = FixedContentProcessor()")
+    print()
+    print("# 2. OpenAI")
+    print("processor = FixedContentProcessor(provider='openai', api_key='your-api-key')")
+    print("# lub ustaw zmienną środowiskową:")
+    print("# export LLM_PROVIDER=openai")
+    print("# export API_KEY=your-openai-api-key")
+    print()
+    print("# 3. Anthropic")
+    print("processor = FixedContentProcessor(provider='anthropic', api_key='your-api-key')")
+    print("# lub ustaw zmienną środowiskową:")
+    print("# export LLM_PROVIDER=anthropic")
+    print("# export API_KEY=your-anthropic-api-key")
+    print()
+    print("# 4. Google")
+    print("processor = FixedContentProcessor(provider='google', api_key='your-api-key')")
+    print("# lub ustaw zmienną środowiskową:")
+    print("# export LLM_PROVIDER=google")
+    print("# export API_KEY=your-google-api-key")
+    print()
+    print("# Przykład z parametrami:")
+    print("processor = FixedContentProcessor(")
+    print("    provider='anthropic',")
+    print("    api_key=os.getenv('ANTHROPIC_API_KEY'),")
+    print("    model='claude-3-haiku-20240307'")
+    print(")")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
