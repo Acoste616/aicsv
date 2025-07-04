@@ -1,14 +1,24 @@
 """
 Centralna konfiguracja systemu analizy zakładek
 """
+import os
+from dotenv import load_dotenv
 
-# Model LLM
+load_dotenv()
+
+# Model LLM - nowa konfiguracja wspierająca różnych dostawców
 LLM_CONFIG = {
+    # Preferowany dostawca (claude, gemini, local)
+    "preferred_provider": os.getenv("PREFERRED_LLM_PROVIDER", "claude"),
+    
+    # Ustawienia dla lokalnego modelu (fallback)
     "api_url": "http://localhost:1234/v1/chat/completions",
-    "model_name": "mistralai/mistral-7b-instruct-v0.3",  # Najlepszy dla RTX 4050
-    "temperature": 0.1,  # Bardzo niska dla konsystentności JSON
-    "max_tokens": 2000,   # Zwiększone z 600 do 2000 dla pełnych JSON-ów
-    "timeout": 45,        # Zwiększone z 30 do 45 sekund
+    "model_name": "mistralai/mistral-7b-instruct-v0.3",
+    
+    # Wspólne ustawienia
+    "temperature": 0.3,
+    "max_tokens": 2000,
+    "timeout": 60,
     "retry_attempts": 2
 }
 
@@ -23,7 +33,7 @@ PIPELINE_CONFIG = {
 
 # Content Extraction
 EXTRACTION_CONFIG = {
-    "timeout": 10,               # Zmniejszone z 15 do 10 sekund
+    "timeout": 10,
     "max_retries": 1,
     "twitter_fallback": True,  # Używaj tylko tekstu tweeta dla Twitter/X
     "min_content_length": 20,  # Bardzo niskie minimum
@@ -43,8 +53,8 @@ MULTIMODAL_CONFIG = {
     "enable_video_metadata": True,
     "ocr_languages": ["en", "pl"],
     "max_thread_length": 50,
-    "image_timeout": 15,         # Zmniejszone z 30 do 15 sekund
-    "concurrent_workers": 8,     # Zwiększone z 4 do 8 
+    "image_timeout": 15,
+    "concurrent_workers": 8,
     "cache_extracted_media": True,
     "cache_dir": "media_cache"
 }

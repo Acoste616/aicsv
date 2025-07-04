@@ -2,32 +2,38 @@
 """
 FIXED CONTENT PROCESSOR
 Naprawiona wersja z poprawionym parsowaniem LLM i error handling
+Zmodyfikowana do używania nowego systemu LLM providers
 
 NAPRAWIONE PROBLEMY:
 1. LLM Response parsing - lepsze wykrywanie i parsowanie JSON
 2. None handling - sprawdzanie czy LLM zwróciło cokolwiek
 3. Error handling - lepsza obsługa błędów
 4. Fallback strategies - działanie nawet przy problemach z ekstrcją
+5. Wsparcie dla różnych LLM API (Claude, Gemini, lokalny)
 """
 
 import json
 import re
-import requests
 import logging
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
 from config import LLM_CONFIG, EXTRACTION_CONFIG
+from llm_providers import LLMManager
 
 class FixedContentProcessor:
     """
     Naprawiona klasa do przetwarzania treści z lepszym error handling i cachingiem.
+    Teraz wspiera różnych dostawców LLM.
     """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.llm_config = LLM_CONFIG.copy()
-        self.api_url = self.llm_config["api_url"]
+        
+        # Inicjalizuj LLM Manager
+        self.llm_manager = LLMManager(preferred_provider=self.llm_config.get("preferred_provider", "claude"))
+        self.logger.info(f"Dostępni dostawcy LLM: {self.llm_manager.list_available_providers()}")
         
         # Cache dla LLM
         self.cache_file = Path("cache_llm.json")
@@ -167,43 +173,27 @@ JSON:'''
             return self.llm_cache[cache_key]
         
         try:
-            payload = {
-                "model": self.llm_config["model_name"],
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.llm_config["temperature"],
-                "max_tokens": self.llm_config["max_tokens"]
-            }
+            # Używaj LLM Manager zamiast bezpośredniego API
+            provider = self.llm_manager.get_provider()
             
-            self.logger.debug(f"Calling LLM with prompt length: {len(prompt)}")
+            self.logger.debug(f"Calling LLM ({provider.__class__.__name__}) with prompt length: {len(prompt)}")
             
-            response = requests.post(
-                self.api_url, 
-                json=payload, 
-                timeout=self.llm_config["timeout"]
+            # Wywołaj LLM przez provider
+            content = provider.generate(
+                prompt=prompt,
+                temperature=self.llm_config.get("temperature", 0.3),
+                max_tokens=self.llm_config.get("max_tokens", 2000)
             )
             
-            if response.status_code == 200:
-                result = response.json()
-                if "choices" in result and len(result["choices"]) > 0:
-                    content = result["choices"][0]["message"]["content"]
-                    self.logger.debug(f"LLM response length: {len(content) if content else 0}")
-                    
-                    # Zapisz do cache
-                    if content:
-                        self.llm_cache[cache_key] = content
-                        self._save_cache()
-                    
-                    return content
-                else:
-                    self.logger.error("LLM response missing choices")
-                    return None
-            else:
-                self.logger.error(f"LLM API error: {response.status_code} - {response.text}")
-                return None
+            self.logger.debug(f"LLM response length: {len(content) if content else 0}")
+            
+            # Zapisz do cache
+            if content:
+                self.llm_cache[cache_key] = content
+                self._save_cache()
+            
+            return content
                 
-        except requests.exceptions.Timeout:
-            self.logger.error("LLM timeout")
-            return None
         except Exception as e:
             self.logger.error(f"LLM call error: {e}")
             return None
