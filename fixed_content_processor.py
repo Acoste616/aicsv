@@ -72,93 +72,71 @@ class FixedContentProcessor:
         return False
 
     def create_smart_prompt(self, url: str, tweet_text: str, extracted_content: str = "") -> str:
-        """Uproszczony prompt do minimum."""
-        # Przygotuj dane
-        data = f"Tweet: {tweet_text}"
-        if extracted_content and len(extracted_content) > 50:
-            data += f"\nDodatkowa treść: {extracted_content[:500]}"
+        """Zoptymalizowany prompt z few-shot examples."""
+        # Przygotuj dane wejściowe
+        input_data = {
+            "tweet": tweet_text[:200],
+            "content": extracted_content[:300] if extracted_content else None,
+            "url": url
+        }
         
-        prompt = f'''Przeanalizuj poniższe dane i zwróć TYLKO poprawny JSON (bez żadnego dodatkowego tekstu):
+        # Few-shot prompt z JSON mode
+        prompt = '''Analizuj treść i zwróć JSON. Przykłady:
 
-{data}
+Input: {"tweet": "Nowy framework do budowania RAG w Pythonie", "content": "LangChain 0.1 wprowadza nowe API..."}
+Output: {"title": "LangChain 0.1 - framework RAG", "short_description": "Nowe API do budowania systemów RAG w Pythonie z LangChain 0.1", "category": "Technologia", "tags": ["RAG", "LangChain", "Python"], "url": "https://example.com"}
 
-Zwróć dokładnie taki format JSON:
-{{
-    "title": "Krótki tytuł do 10 słów",
-    "short_description": "Opis w 1-2 zdaniach",
-    "category": "Technologia",
-    "tags": ["tag1", "tag2", "tag3"],
-    "url": "{url}"
-}}
+Input: {"tweet": "Analiza rynku krypto 2024", "content": "Bitcoin osiągnął nowe ATH..."}
+Output: {"title": "Bitcoin ATH - analiza rynku 2024", "short_description": "Analiza wzrostu Bitcoina i prognozy na 2024 rok", "category": "Biznes", "tags": ["Bitcoin", "krypto", "inwestycje"], "url": "https://example.com"}
 
-Przykład poprawnej odpowiedzi:
-{{
-    "title": "Budowanie systemów RAG z LangChain",
-    "short_description": "Przewodnik pokazuje jak tworzyć systemy RAG używając LangChain z fokusem na strategie podziału tekstu.",
-    "category": "Technologia",
-    "tags": ["RAG", "LangChain", "AI"],
-    "url": "https://example.com"
-}}
-
-JSON:'''
+Teraz przeanalizuj:
+''' + json.dumps(input_data, ensure_ascii=False) + '\nOutput:'
+        
         return prompt
 
     def create_multimodal_prompt(self, tweet_data: Dict, extracted_contents: Dict) -> str:
-        """
-        Tworzy uproszczony prompt multimodalny z prostszym formatem JSON.
-        """
+        """Zoptymalizowany prompt multimodalny z few-shot."""
         
-        # Przygotuj dane wejściowe
-        url = tweet_data.get('url', '')
-        tweet_text = extracted_contents.get('tweet_text', '')
-        article_content = extracted_contents.get('article_content', '')
-        ocr_results = extracted_contents.get('ocr_results', [])
-        thread_content = extracted_contents.get('thread_content', [])
-        video_metadata = extracted_contents.get('video_metadata', {})
+        # Kompaktowe dane wejściowe
+        input_data = {
+            "url": tweet_data.get('url', ''),
+            "tweet": extracted_contents.get('tweet_text', '')[:100],
+            "article": extracted_contents.get('article_content', '')[:200] if extracted_contents.get('article_content') else None,
+            "images": len(extracted_contents.get('ocr_results', [])),
+            "thread": len(extracted_contents.get('thread_content', [])),
+            "video": bool(extracted_contents.get('video_metadata'))
+        }
         
-        # Skrócone treści dla prompta
-        article_summary = article_content[:800] if article_content else "Brak artykułu"
-        ocr_summary = " ".join([result.get('text', '')[:200] for result in ocr_results])[:400]
-        thread_summary = " ".join([tweet.get('text', '')[:100] for tweet in thread_content])[:400]
-        video_title = video_metadata.get('title', 'Brak wideo')[:100]
+        # Few-shot multimodal prompt
+        prompt = '''Analizuj dane multimodalne. Przykłady:
+
+Input: {"tweet": "Thread o ML pipelines", "article": "Budowanie produkcyjnych pipeline'ów ML...", "images": 3, "thread": 5, "video": false}
+Output: {"tweet_url": "https://x.com/123", "title": "Pipeline ML w produkcji - kompletny przewodnik", "summary": "Thread opisuje budowanie produkcyjnych pipeline'ów ML z przykładami kodu i diagramami. Zawiera 5 części pokrywających architekturę, monitoring i deployment.", "category": "Technologia", "key_points": ["Architektura pipeline ML", "Monitoring modeli", "Deployment strategii"], "content_types": ["thread", "image", "article"], "technical_level": "advanced", "has_code": true, "estimated_time": "15 min"}
+
+Input: {"tweet": "Nowa strategia inwestycyjna 2024", "article": null, "images": 1, "thread": 0, "video": true}
+Output: {"tweet_url": "https://x.com/456", "title": "Strategia inwestycyjna na 2024", "summary": "Wideo prezentuje analizę rynku i strategię inwestycyjną na 2024. Omawia trendy makroekonomiczne i konkretne sektory.", "category": "Biznes", "key_points": ["Analiza makro", "Sektory wzrostowe", "Risk management"], "content_types": ["video", "image"], "technical_level": "intermediate", "has_code": false, "estimated_time": "20 min"}
+
+Analizuj:
+''' + json.dumps(input_data, ensure_ascii=False) + '\nOutput:'
         
-        prompt = f'''Przeanalizuj poniższe dane multimodalne i zwróć TYLKO poprawny JSON:
+        return prompt
 
-DANE WEJŚCIOWE:
-URL: {url}
-Tweet: {tweet_text}
-Artykuł: {article_summary}
-OCR tekst: {ocr_summary}
-Thread: {thread_summary}
-Wideo: {video_title}
+    def create_fallback_prompt(self, url: str, tweet_text: str) -> str:
+        """Prosty fallback prompt gdy główny parsing zawiedzie."""
+        # Bardzo prosty format z minimalnym przykładem
+        prompt = f'''Stwórz prosty JSON dla tego tweeta:
 
-Zwróć dokładnie taki uproszczony format JSON:
-{{
-    "tweet_url": "{url}",
-    "title": "Krótki tytuł max 15 słów",
-    "summary": "Zwięzły opis w 2-3 zdaniach", 
-    "category": "jedna główna kategoria",
-    "key_points": ["kluczowy punkt 1", "kluczowy punkt 2", "kluczowy punkt 3"],
-    "content_types": ["article", "image", "thread"],
-    "technical_level": "beginner",
-    "has_code": false,
-    "estimated_time": "5 min"
-}}
+Tweet: "{tweet_text[:100]}"
 
-WAŻNE ZASADY:
-- Użyj TYLKO podanych kategorii: "Technologia", "Biznes", "Edukacja", "Nauka", "Inne"
-- content_types: wybierz z "article", "image", "thread", "video", "tweet"
-- technical_level: "beginner", "intermediate", "advanced"
-- key_points: maksymalnie 3-5 punktów
-- has_code: true tylko jeśli zawiera kod programistyczny
-- estimated_time: "X min" gdzie X to szacowany czas
+Format: {{"title": "tytuł", "category": "kategoria"}}
+Przykład: {{"title": "Analiza rynku AI", "category": "Technologia"}}
 
-JSON:'''
+JSON dla tweeta:'''
         
         return prompt
 
     def _call_llm(self, prompt: str) -> Optional[str]:
-        """Wywołuje LLM z lepszym error handling i cachingiem."""
+        """Wywołuje LLM z JSON mode i temperature=0.1."""
         
         # Sprawdź cache
         cache_key = self._get_cache_key(prompt)
@@ -167,12 +145,26 @@ JSON:'''
             return self.llm_cache[cache_key]
         
         try:
+            # Konfiguracja dla JSON mode (GPT-4)
+            messages = [{"role": "user", "content": prompt}]
+            
+            # Jeśli model to GPT-4, dodaj system message dla JSON mode
+            if "gpt-4" in self.llm_config.get("model_name", "").lower():
+                messages.insert(0, {
+                    "role": "system", 
+                    "content": "You are a helpful assistant designed to output JSON. Always respond with valid JSON only, no additional text."
+                })
+            
             payload = {
                 "model": self.llm_config["model_name"],
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.llm_config["temperature"],
-                "max_tokens": self.llm_config["max_tokens"]
+                "messages": messages,
+                "temperature": 0.1,  # Niska temperatura dla konsystencji
+                "max_tokens": self.llm_config["max_tokens"],
+                "response_format": {"type": "json_object"} if "gpt-4" in self.llm_config.get("model_name", "").lower() else None
             }
+            
+            # Usuń None values z payload
+            payload = {k: v for k, v in payload.items() if v is not None}
             
             self.logger.debug(f"Calling LLM with prompt length: {len(prompt)}")
             
@@ -277,7 +269,7 @@ JSON:'''
 
     def process_single_item(self, url: str, tweet_text: str = "", extracted_content: str = "") -> Optional[Dict]:
         """
-        Przetwarza pojedynczy element z pełnym error handling i optymalizacjami.
+        Przetwarza pojedynczy element z fallback prompts.
         """
         self.logger.info(f"Fixed processing: {url[:50]}...")
         
@@ -286,7 +278,7 @@ JSON:'''
             return self._create_quick_fallback_result(url, tweet_text)
         
         try:
-            # Krok 1: Stwórz prompt
+            # Krok 1: Stwórz główny prompt
             prompt = self.create_smart_prompt(url, tweet_text, extracted_content)
             
             # Krok 2: Wywołaj LLM
@@ -299,16 +291,43 @@ JSON:'''
             # Krok 3: Parsuj JSON
             analysis = self._extract_json_from_response(response)
             
+            # Krok 4: Jeśli parsing nie zadziałał, spróbuj fallback prompt
             if not analysis:
-                self.logger.warning(f"Could not parse LLM response for {url}, using fallback")
-                return self._create_fallback_result(url, tweet_text)
+                self.logger.warning(f"JSON parsing failed, trying fallback prompt for {url}")
                 
-            # Krok 4: Waliduj wynik
+                # Fallback prompt
+                fallback_prompt = self.create_fallback_prompt(url, tweet_text)
+                fallback_response = self._call_llm(fallback_prompt)
+                
+                if fallback_response:
+                    fallback_analysis = self._extract_json_from_response(fallback_response)
+                    if fallback_analysis:
+                        # Uzupełnij brakujące pola
+                        analysis = {
+                            "title": fallback_analysis.get("title", tweet_text[:50]),
+                            "short_description": f"Analiza: {fallback_analysis.get('title', '')}",
+                            "category": fallback_analysis.get("category", "Inne"),
+                            "tags": [fallback_analysis.get("category", "inne").lower()],
+                            "url": url,
+                            "from_fallback": True
+                        }
+                    else:
+                        self.logger.warning(f"Fallback parsing also failed for {url}")
+                        return self._create_fallback_result(url, tweet_text)
+                else:
+                    return self._create_fallback_result(url, tweet_text)
+                    
+            # Krok 5: Waliduj wynik
             required_fields = ["title", "short_description", "category", "tags", "url"]
             for field in required_fields:
                 if field not in analysis:
                     self.logger.warning(f"Missing field {field} in LLM response for {url}")
-                    analysis[field] = f"Brak {field}" if field != "tags" else []
+                    if field == "url":
+                        analysis[field] = url
+                    elif field == "tags":
+                        analysis[field] = []
+                    else:
+                        analysis[field] = f"Brak {field}"
                     
             # Dodaj metadata
             analysis["processing_success"] = True
@@ -335,14 +354,7 @@ JSON:'''
 
     def process_multimodal_item(self, tweet_data: Dict, extracted_contents: Dict) -> Optional[Dict]:
         """
-        Przetwarza element wykorzystując zaawansowany prompt multimodalny.
-        
-        Args:
-            tweet_data: Podstawowe dane tweeta (zawiera URL)
-            extracted_contents: Słownik z różnymi typami treści
-        
-        Returns:
-            Pełną analizę uwzględniającą wszystkie typy treści
+        Przetwarza element multimodalny z fallback prompts.
         """
         url = tweet_data.get('url', '')
         tweet_text = extracted_contents.get('tweet_text', '')
@@ -363,57 +375,39 @@ JSON:'''
             # Krok 3: Parsuj JSON
             analysis = self._extract_json_from_response(response)
             
+            # Krok 4: Jeśli parsing nie zadziałał, użyj fallback prompt
             if not analysis:
-                self.logger.warning(f"Could not parse LLM response for {url}, using fallback")
-                return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
+                self.logger.warning(f"JSON parsing failed, trying fallback prompt for multimodal {url}")
                 
-            # Krok 4: Waliduj wynik z rozszerzonymi polami
-            required_fields = ["tweet_url", "title", "short_description", "category", "content_type"]
-            for field in required_fields:
-                if field not in analysis:
-                    self.logger.warning(f"Missing field {field} in LLM response for {url}")
-                    if field == "tweet_url":
-                        analysis[field] = url
-                    elif field == "content_type":
-                        analysis[field] = "mixed"
+                # Użyj prostszego fallback prompt
+                fallback_prompt = self.create_fallback_prompt(url, tweet_text)
+                fallback_response = self._call_llm(fallback_prompt)
+                
+                if fallback_response:
+                    fallback_analysis = self._extract_json_from_response(fallback_response)
+                    if fallback_analysis:
+                        # Stwórz minimalną analizę multimodalną na bazie fallback
+                        content_types = self._detect_content_types(extracted_contents)
+                        analysis = {
+                            "tweet_url": url,
+                            "title": fallback_analysis.get("title", tweet_text[:50]),
+                            "summary": f"Multimodalna analiza: {fallback_analysis.get('title', '')}",
+                            "category": fallback_analysis.get("category", "Inne"),
+                            "key_points": ["Analiza multimodalna", f"{len(content_types)} typów treści"],
+                            "content_types": content_types,
+                            "technical_level": "unknown",
+                            "has_code": False,
+                            "estimated_time": f"{len(content_types) * 3} min",
+                            "from_fallback": True
+                        }
                     else:
-                        analysis[field] = f"Brak {field}"
+                        return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
+                else:
+                    return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
+                
+            # Krok 5: Waliduj i uzupełnij brakujące pola
+            self._validate_multimodal_analysis(analysis, url)
             
-            # Dodaj dodatkowe pola jeśli nie ma
-            optional_fields = {
-                "detailed_analysis": "Szczegółowa analiza niedostępna",
-                "tags": [],
-                "extracted_from": {
-                    "articles": [],
-                    "images": [],
-                    "videos": [],
-                    "thread_length": 0
-                },
-                "knowledge": {
-                    "main_topic": "Nieznany",
-                    "key_insights": [],
-                    "code_snippets": [],
-                    "data_points": [],
-                    "visual_elements": []
-                },
-                "thread_summary": {
-                    "main_points": [],
-                    "conclusion": "Brak wniosków",
-                    "author_expertise": "Nieznana"
-                },
-                "media_analysis": {
-                    "images": [],
-                    "videos": []
-                },
-                "technical_level": "unknown",
-                "has_tutorial": False,
-                "has_data": False
-            }
-            
-            for field, default_value in optional_fields.items():
-                if field not in analysis:
-                    analysis[field] = default_value
-                    
             # Dodaj metadata
             analysis["processing_success"] = True
             analysis["multimodal_processing"] = True
@@ -426,6 +420,42 @@ JSON:'''
             self.logger.error(f"Multimodal processing error for {url}: {e}")
             return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
 
+    def _detect_content_types(self, extracted_contents: Dict) -> List[str]:
+        """Wykrywa typy treści w extracted_contents."""
+        content_types = ["tweet"]  # Zawsze mamy tweet
+        
+        if extracted_contents.get("thread_content"):
+            content_types.append("thread")
+        if extracted_contents.get("article_content"):
+            content_types.append("article")
+        if extracted_contents.get("ocr_results"):
+            content_types.append("image")
+        if extracted_contents.get("video_metadata"):
+            content_types.append("video")
+            
+        return content_types
+    
+    def _validate_multimodal_analysis(self, analysis: Dict, url: str):
+        """Waliduje i uzupełnia brakujące pola w analizie multimodalnej."""
+        # Podstawowe wymagane pola
+        required_fields = {
+            "tweet_url": url,
+            "title": "Brak tytułu",
+            "summary": "Brak podsumowania",
+            "category": "Inne",
+            "key_points": [],
+            "content_types": ["tweet"],
+            "technical_level": "unknown",
+            "has_code": False,
+            "estimated_time": "5 min"
+        }
+        
+        # Uzupełnij brakujące pola
+        for field, default_value in required_fields.items():
+            if field not in analysis:
+                self.logger.warning(f"Missing field {field} in multimodal analysis")
+                analysis[field] = default_value
+    
     def _create_multimodal_fallback(self, url: str, tweet_text: str, extracted_contents: Dict) -> Dict:
         """Tworzy rozszerzony fallback result dla przetwarzania multimodalnego."""
         
