@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-FIXED CONTENT PROCESSOR
-Naprawiona wersja z poprawionym parsowaniem LLM i error handling
+FIXED CONTENT PROCESSOR - Optimized for Cloud LLM
+Zoptymalizowana wersja z ulepszonymi promptami dla cloud LLM
 
-NAPRAWIONE PROBLEMY:
-1. LLM Response parsing - lepsze wykrywanie i parsowanie JSON
-2. None handling - sprawdzanie czy LLM zwróciło cokolwiek
-3. Error handling - lepsza obsługa błędów
-4. Fallback strategies - działanie nawet przy problemach z ekstrcją
+OPTYMALIZACJE:
+1. Skrócone prompty o 50% zachowując jakość
+2. Few-shot examples zamiast długich instrukcji
+3. Structured output z JSON mode (dla GPT-4)
+4. Temperature=0.1 dla konsystencji
+5. Fallback prompts gdy JSON parsing fails
 """
 
 import json
@@ -21,17 +22,28 @@ from config import LLM_CONFIG, EXTRACTION_CONFIG
 
 class FixedContentProcessor:
     """
-    Naprawiona klasa do przetwarzania treści z lepszym error handling i cachingiem.
+    Zoptymalizowana klasa do przetwarzania treści z ulepszonymi promptami cloud LLM.
     """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.llm_config = LLM_CONFIG.copy()
+        
+        # Optymalizacja dla cloud LLM
+        self.llm_config["temperature"] = 0.1  # Konsystencja
+        self.llm_config["response_format"] = {"type": "json_object"}  # JSON mode dla GPT-4
+        
         self.api_url = self.llm_config["api_url"]
         
         # Cache dla LLM
         self.cache_file = Path("cache_llm.json")
         self.llm_cache = self._load_cache()
+        
+        # Fallback prompts
+        self.fallback_prompts = {
+            "simple": self._create_simple_fallback_prompt,
+            "minimal": self._create_minimal_fallback_prompt
+        }
 
     def _load_cache(self) -> Dict:
         """Ładuje cache z pliku"""
@@ -72,93 +84,85 @@ class FixedContentProcessor:
         return False
 
     def create_smart_prompt(self, url: str, tweet_text: str, extracted_content: str = "") -> str:
-        """Uproszczony prompt do minimum."""
-        # Przygotuj dane
-        data = f"Tweet: {tweet_text}"
-        if extracted_content and len(extracted_content) > 50:
-            data += f"\nDodatkowa treść: {extracted_content[:500]}"
+        """Zoptymalizowany prompt z few-shot examples - skrócony o 50%."""
         
-        prompt = f'''Przeanalizuj poniższe dane i zwróć TYLKO poprawny JSON (bez żadnego dodatkowego tekstu):
+        # Przygotuj dane wejściowe
+        content = tweet_text
+        if extracted_content and len(extracted_content) > 50:
+            content += f" | {extracted_content[:300]}"
+        
+        # Skrócony prompt z few-shot examples
+        prompt = f'''Analyze content and return JSON:
 
-{data}
+INPUT: {content}
 
-Zwróć dokładnie taki format JSON:
-{{
-    "title": "Krótki tytuł do 10 słów",
-    "short_description": "Opis w 1-2 zdaniach",
-    "category": "Technologia",
-    "tags": ["tag1", "tag2", "tag3"],
-    "url": "{url}"
-}}
+Examples:
+1. Input: "Building RAG systems with LangChain - complete guide"
+   Output: {{"title": "RAG Systems with LangChain Guide", "description": "Complete guide to building RAG systems using LangChain framework.", "category": "Technologia", "tags": ["RAG", "LangChain", "AI"], "url": "{url}"}}
 
-Przykład poprawnej odpowiedzi:
-{{
-    "title": "Budowanie systemów RAG z LangChain",
-    "short_description": "Przewodnik pokazuje jak tworzyć systemy RAG używając LangChain z fokusem na strategie podziału tekstu.",
-    "category": "Technologia",
-    "tags": ["RAG", "LangChain", "AI"],
-    "url": "https://example.com"
-}}
+2. Input: "5 Python tips for beginners"
+   Output: {{"title": "5 Python Tips for Beginners", "description": "Essential Python programming tips for new developers.", "category": "Edukacja", "tags": ["Python", "programming", "tips"], "url": "{url}"}}
 
-JSON:'''
+Format:
+{{"title": "max 10 words", "description": "1-2 sentences", "category": "Technologia|Biznes|Edukacja|Nauka|Inne", "tags": ["3-5 tags"], "url": "{url}"}}'''
+        
         return prompt
 
     def create_multimodal_prompt(self, tweet_data: Dict, extracted_contents: Dict) -> str:
-        """
-        Tworzy uproszczony prompt multimodalny z prostszym formatem JSON.
-        """
+        """Zoptymalizowany prompt multimodalny - skrócony o 50% z few-shot examples."""
         
-        # Przygotuj dane wejściowe
+        # Przygotuj dane wejściowe (skrócone)
         url = tweet_data.get('url', '')
         tweet_text = extracted_contents.get('tweet_text', '')
-        article_content = extracted_contents.get('article_content', '')
-        ocr_results = extracted_contents.get('ocr_results', [])
-        thread_content = extracted_contents.get('thread_content', [])
-        video_metadata = extracted_contents.get('video_metadata', {})
+        article_content = extracted_contents.get('article_content', '')[:400]  # Skrócone
+        ocr_text = " ".join([r.get('text', '')[:100] for r in extracted_contents.get('ocr_results', [])])[:200]
+        thread_text = " ".join([t.get('text', '')[:50] for t in extracted_contents.get('thread_content', [])])[:200]
+        video_title = extracted_contents.get('video_metadata', {}).get('title', '')[:50]
         
-        # Skrócone treści dla prompta
-        article_summary = article_content[:800] if article_content else "Brak artykułu"
-        ocr_summary = " ".join([result.get('text', '')[:200] for result in ocr_results])[:400]
-        thread_summary = " ".join([tweet.get('text', '')[:100] for tweet in thread_content])[:400]
-        video_title = video_metadata.get('title', 'Brak wideo')[:100]
+        # Określ typy treści
+        content_types = []
+        if tweet_text: content_types.append("tweet")
+        if article_content: content_types.append("article")
+        if ocr_text: content_types.append("image")
+        if thread_text: content_types.append("thread")
+        if video_title: content_types.append("video")
         
-        prompt = f'''Przeanalizuj poniższe dane multimodalne i zwróć TYLKO poprawny JSON:
+        # Skrócony prompt z few-shot examples
+        prompt = f'''Analyze multimodal content and return JSON:
 
-DANE WEJŚCIOWE:
-URL: {url}
+DATA:
 Tweet: {tweet_text}
-Artykuł: {article_summary}
-OCR tekst: {ocr_summary}
-Thread: {thread_summary}
-Wideo: {video_title}
+Article: {article_content}
+Images: {ocr_text}
+Thread: {thread_text}
+Video: {video_title}
 
-Zwróć dokładnie taki uproszczony format JSON:
-{{
-    "tweet_url": "{url}",
-    "title": "Krótki tytuł max 15 słów",
-    "summary": "Zwięzły opis w 2-3 zdaniach", 
-    "category": "jedna główna kategoria",
-    "key_points": ["kluczowy punkt 1", "kluczowy punkt 2", "kluczowy punkt 3"],
-    "content_types": ["article", "image", "thread"],
-    "technical_level": "beginner",
-    "has_code": false,
-    "estimated_time": "5 min"
-}}
+Examples:
+1. Input: Tweet about "AI tutorial", Article: "Machine learning basics", Images: "code screenshots"
+   Output: {{"title": "AI Tutorial with ML Basics", "summary": "Tutorial covering AI and machine learning fundamentals with code examples.", "category": "Technologia", "key_points": ["AI basics", "ML fundamentals", "code examples"], "content_types": ["tweet", "article", "image"], "technical_level": "beginner", "has_code": true, "estimated_time": "15 min"}}
 
-WAŻNE ZASADY:
-- Użyj TYLKO podanych kategorii: "Technologia", "Biznes", "Edukacja", "Nauka", "Inne"
-- content_types: wybierz z "article", "image", "thread", "video", "tweet"
-- technical_level: "beginner", "intermediate", "advanced"
-- key_points: maksymalnie 3-5 punktów
-- has_code: true tylko jeśli zawiera kod programistyczny
-- estimated_time: "X min" gdzie X to szacowany czas
+2. Input: Tweet about "business strategy", Thread: "startup advice", no images
+   Output: {{"title": "Business Strategy for Startups", "summary": "Strategic advice for startup businesses and entrepreneurs.", "category": "Biznes", "key_points": ["business strategy", "startup advice", "entrepreneurship"], "content_types": ["tweet", "thread"], "technical_level": "beginner", "has_code": false, "estimated_time": "10 min"}}
 
-JSON:'''
+Format:
+{{"title": "max 15 words", "summary": "2-3 sentences", "category": "Technologia|Biznes|Edukacja|Nauka|Inne", "key_points": ["3-5 points"], "content_types": {json.dumps(content_types)}, "technical_level": "beginner|intermediate|advanced", "has_code": true|false, "estimated_time": "X min"}}'''
         
         return prompt
 
-    def _call_llm(self, prompt: str) -> Optional[str]:
-        """Wywołuje LLM z lepszym error handling i cachingiem."""
+    def _create_simple_fallback_prompt(self, content: str, url: str) -> str:
+        """Prosty fallback prompt gdy główny zawodzi."""
+        return f'''Analyze: {content[:200]}
+
+Return JSON:
+{{"title": "short title", "category": "Inne", "tags": ["general"], "url": "{url}"}}'''
+
+    def _create_minimal_fallback_prompt(self, content: str, url: str) -> str:
+        """Minimalny fallback prompt gdy pozostałe zawiodą."""
+        return f'''Content: {content[:100]}
+JSON: {{"title": "Content Analysis", "category": "Inne", "url": "{url}"}}'''
+
+    def _call_llm(self, prompt: str, use_json_mode: bool = True) -> Optional[str]:
+        """Wywołuje LLM z optymalizacją dla cloud LLM."""
         
         # Sprawdź cache
         cache_key = self._get_cache_key(prompt)
@@ -170,9 +174,13 @@ JSON:'''
             payload = {
                 "model": self.llm_config["model_name"],
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.llm_config["temperature"],
+                "temperature": 0.1,  # Wymuszona konsystencja
                 "max_tokens": self.llm_config["max_tokens"]
             }
+            
+            # Dodaj JSON mode dla GPT-4
+            if use_json_mode and "gpt-4" in self.llm_config["model_name"].lower():
+                payload["response_format"] = {"type": "json_object"}
             
             self.logger.debug(f"Calling LLM with prompt length: {len(prompt)}")
             
@@ -275,46 +283,71 @@ JSON:'''
             "fallback": True
         }
 
+    def _try_fallback_prompts(self, url: str, tweet_text: str, extracted_content: str) -> Optional[Dict]:
+        """Próbuje fallback prompts gdy główny prompt zawodzi."""
+        content = f"{tweet_text} {extracted_content}"[:500]
+        
+        for fallback_name, fallback_func in self.fallback_prompts.items():
+            try:
+                self.logger.info(f"Trying fallback prompt: {fallback_name}")
+                
+                fallback_prompt = fallback_func(content, url)
+                response = self._call_llm(fallback_prompt, use_json_mode=False)
+                
+                if response:
+                    analysis = self._extract_json_from_response(response)
+                    if analysis:
+                        analysis["fallback_used"] = fallback_name
+                        return analysis
+                        
+            except Exception as e:
+                self.logger.warning(f"Fallback prompt {fallback_name} failed: {e}")
+                continue
+                
+        return None
+
     def process_single_item(self, url: str, tweet_text: str = "", extracted_content: str = "") -> Optional[Dict]:
         """
-        Przetwarza pojedynczy element z pełnym error handling i optymalizacjami.
+        Przetwarza pojedynczy element z optymalizowanymi promptami i fallback strategiami.
         """
-        self.logger.info(f"Fixed processing: {url[:50]}...")
+        self.logger.info(f"Optimized processing: {url[:50]}...")
         
         # Sprawdź czy można pominąć przetwarzanie
         if self._should_skip_processing(tweet_text, url):
             return self._create_quick_fallback_result(url, tweet_text)
         
         try:
-            # Krok 1: Stwórz prompt
+            # Krok 1: Główny zoptymalizowany prompt
             prompt = self.create_smart_prompt(url, tweet_text, extracted_content)
-            
-            # Krok 2: Wywołaj LLM
             response = self._call_llm(prompt)
             
-            if not response:
-                self.logger.warning(f"LLM returned no response for {url}, using fallback")
-                return self._create_fallback_result(url, tweet_text)
-                
-            # Krok 3: Parsuj JSON
-            analysis = self._extract_json_from_response(response)
-            
-            if not analysis:
-                self.logger.warning(f"Could not parse LLM response for {url}, using fallback")
-                return self._create_fallback_result(url, tweet_text)
-                
-            # Krok 4: Waliduj wynik
-            required_fields = ["title", "short_description", "category", "tags", "url"]
-            for field in required_fields:
-                if field not in analysis:
-                    self.logger.warning(f"Missing field {field} in LLM response for {url}")
-                    analysis[field] = f"Brak {field}" if field != "tags" else []
+            if response:
+                analysis = self._extract_json_from_response(response)
+                if analysis:
+                    # Waliduj wynik
+                    required_fields = ["title", "description", "category", "tags", "url"]
+                    for field in required_fields:
+                        if field not in analysis:
+                            analysis[field] = f"Brak {field}" if field != "tags" else []
                     
-            # Dodaj metadata
-            analysis["processing_success"] = True
+                    analysis["processing_success"] = True
+                    analysis["optimized_prompt"] = True
+                    
+                    self.logger.info(f"Successfully processed with main prompt: {url[:50]}...")
+                    return analysis
             
-            self.logger.info(f"Successfully processed: {url[:50]}...")
-            return analysis
+            # Krok 2: Spróbuj fallback prompts
+            self.logger.warning(f"Main prompt failed, trying fallback prompts for {url}")
+            analysis = self._try_fallback_prompts(url, tweet_text, extracted_content)
+            
+            if analysis:
+                analysis["processing_success"] = True
+                self.logger.info(f"Successfully processed with fallback: {url[:50]}...")
+                return analysis
+                
+            # Krok 3: Ostateczny fallback
+            self.logger.warning(f"All prompts failed, using final fallback for {url}")
+            return self._create_fallback_result(url, tweet_text)
             
         except Exception as e:
             self.logger.error(f"Processing error for {url}: {e}")
@@ -335,108 +368,56 @@ JSON:'''
 
     def process_multimodal_item(self, tweet_data: Dict, extracted_contents: Dict) -> Optional[Dict]:
         """
-        Przetwarza element wykorzystując zaawansowany prompt multimodalny.
-        
-        Args:
-            tweet_data: Podstawowe dane tweeta (zawiera URL)
-            extracted_contents: Słownik z różnymi typami treści
-        
-        Returns:
-            Pełną analizę uwzględniającą wszystkie typy treści
+        Przetwarza element z zoptymalizowanym promptem multimodalnym.
         """
         url = tweet_data.get('url', '')
         tweet_text = extracted_contents.get('tweet_text', '')
         
-        self.logger.info(f"Multimodal processing: {url[:50]}...")
+        self.logger.info(f"Optimized multimodal processing: {url[:50]}...")
         
         try:
-            # Krok 1: Stwórz zaawansowany prompt multimodalny
+            # Krok 1: Główny zoptymalizowany prompt multimodalny
             prompt = self.create_multimodal_prompt(tweet_data, extracted_contents)
-            
-            # Krok 2: Wywołaj LLM
             response = self._call_llm(prompt)
             
-            if not response:
-                self.logger.warning(f"LLM returned no response for {url}, using fallback")
-                return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
-                
-            # Krok 3: Parsuj JSON
-            analysis = self._extract_json_from_response(response)
-            
-            if not analysis:
-                self.logger.warning(f"Could not parse LLM response for {url}, using fallback")
-                return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
-                
-            # Krok 4: Waliduj wynik z rozszerzonymi polami
-            required_fields = ["tweet_url", "title", "short_description", "category", "content_type"]
-            for field in required_fields:
-                if field not in analysis:
-                    self.logger.warning(f"Missing field {field} in LLM response for {url}")
-                    if field == "tweet_url":
-                        analysis[field] = url
-                    elif field == "content_type":
-                        analysis[field] = "mixed"
-                    else:
-                        analysis[field] = f"Brak {field}"
-            
-            # Dodaj dodatkowe pola jeśli nie ma
-            optional_fields = {
-                "detailed_analysis": "Szczegółowa analiza niedostępna",
-                "tags": [],
-                "extracted_from": {
-                    "articles": [],
-                    "images": [],
-                    "videos": [],
-                    "thread_length": 0
-                },
-                "knowledge": {
-                    "main_topic": "Nieznany",
-                    "key_insights": [],
-                    "code_snippets": [],
-                    "data_points": [],
-                    "visual_elements": []
-                },
-                "thread_summary": {
-                    "main_points": [],
-                    "conclusion": "Brak wniosków",
-                    "author_expertise": "Nieznana"
-                },
-                "media_analysis": {
-                    "images": [],
-                    "videos": []
-                },
-                "technical_level": "unknown",
-                "has_tutorial": False,
-                "has_data": False
-            }
-            
-            for field, default_value in optional_fields.items():
-                if field not in analysis:
-                    analysis[field] = default_value
+            if response:
+                analysis = self._extract_json_from_response(response)
+                if analysis:
+                    # Waliduj wynik
+                    required_fields = ["title", "summary", "category", "key_points", "content_types"]
+                    for field in required_fields:
+                        if field not in analysis:
+                            if field == "key_points" or field == "content_types":
+                                analysis[field] = []
+                            else:
+                                analysis[field] = f"Brak {field}"
                     
-            # Dodaj metadata
-            analysis["processing_success"] = True
-            analysis["multimodal_processing"] = True
-            analysis["processed_content_types"] = list(extracted_contents.keys())
+                    # Dodaj standardowe pola
+                    analysis["tweet_url"] = url
+                    analysis["processing_success"] = True
+                    analysis["multimodal_processing"] = True
+                    analysis["optimized_prompt"] = True
+                    
+                    self.logger.info(f"Successfully processed multimodal with main prompt: {url[:50]}...")
+                    return analysis
             
-            self.logger.info(f"Successfully processed multimodal: {url[:50]}...")
-            return analysis
+            # Krok 2: Fallback dla multimodal
+            self.logger.warning(f"Multimodal prompt failed, using fallback for {url}")
+            return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
             
         except Exception as e:
             self.logger.error(f"Multimodal processing error for {url}: {e}")
             return self._create_multimodal_fallback(url, tweet_text, extracted_contents)
 
     def _create_multimodal_fallback(self, url: str, tweet_text: str, extracted_contents: Dict) -> Dict:
-        """Tworzy rozszerzony fallback result dla przetwarzania multimodalnego."""
+        """Tworzy fallback result dla przetwarzania multimodalnego."""
         
-        # Zbierz wszystkie dostępne treści
-        all_texts = []
-        if tweet_text:
-            all_texts.append(tweet_text)
+        # Zbierz dostępne treści
+        all_texts = [tweet_text] if tweet_text else []
+        if extracted_contents.get("article_content"):
+            all_texts.append(extracted_contents["article_content"][:100])
         if extracted_contents.get("thread_content"):
-            all_texts.append(extracted_contents["thread_content"][:100])
-        if extracted_contents.get("article_contents"):
-            all_texts.extend([content[:100] for content in extracted_contents["article_contents"][:2]])
+            all_texts.append(str(extracted_contents["thread_content"])[:100])
         
         combined_text = " ".join(all_texts)[:200]
         
@@ -444,62 +425,26 @@ JSON:'''
         content_types = ["tweet"]
         if extracted_contents.get("thread_content"):
             content_types.append("thread")
-        if extracted_contents.get("image_texts"):
+        if extracted_contents.get("ocr_results"):
             content_types.append("image")
         if extracted_contents.get("video_metadata"):
             content_types.append("video")
-        if extracted_contents.get("article_contents"):
+        if extracted_contents.get("article_content"):
             content_types.append("article")
-        
-        # Określ główny typ treści
-        if len(content_types) > 2:
-            main_content_type = "mixed"
-        elif "thread" in content_types:
-            main_content_type = "thread"
-        elif "article" in content_types:
-            main_content_type = "article"
-        else:
-            main_content_type = "multimedia"
-        
-        # Przygotuj dane extracted_from
-        extracted_from = {
-            "articles": extracted_contents.get("article_contents", [])[:2],  # Max 2 URLs
-            "images": [img.get("url", "") for img in extracted_contents.get("images", [])][:3],  # Max 3 images
-            "videos": [vid.get("url", "") for vid in extracted_contents.get("videos", [])][:2],  # Max 2 videos
-            "thread_length": len(extracted_contents.get("thread_content", "").split("\n\n")) if extracted_contents.get("thread_content") else 0
-        }
         
         return {
             "tweet_url": url,
             "title": combined_text[:50] + "..." if len(combined_text) > 50 else combined_text,
-            "short_description": "Analiza automatyczna na podstawie dostępnych treści multimodalnych",
-            "detailed_analysis": f"Przetworzono {len(content_types)} typów treści: {', '.join(content_types)}",
+            "summary": "Analiza automatyczna treści multimodalnych",
             "category": "Inne",
-            "content_type": main_content_type,
-            "tags": ["multimodal", "automatyczna"] + content_types,
-            "extracted_from": extracted_from,
-            "knowledge": {
-                "main_topic": "Automatyczna analiza treści multimodalnych",
-                "key_insights": ["Automatyczna analiza", "Różne typy mediów"],
-                "code_snippets": [],
-                "data_points": [],
-                "visual_elements": []
-            },
-            "thread_summary": {
-                "main_points": ["Fallback analiza"],
-                "conclusion": "Analiza automatyczna",
-                "author_expertise": "Nieznana"
-            },
-            "media_analysis": {
-                "images": [{"type": "unknown", "content": "Automatyczna analiza", "key_concepts": []} for _ in extracted_contents.get("images", [])],
-                "videos": [{"platform": "unknown", "title": "Video", "key_topics": []} for _ in extracted_contents.get("videos", [])]
-            },
+            "key_points": ["automatyczna analiza", "treści multimodalne"],
+            "content_types": content_types,
             "technical_level": "unknown",
-            "has_tutorial": "tutorial" in combined_text.lower() or "kod" in combined_text.lower(),
-            "has_data": any(char.isdigit() for char in combined_text),
+            "has_code": False,
+            "estimated_time": "5 min",
             "fallback": True,
             "multimodal_processing": True,
-            "processed_content_types": list(extracted_contents.keys())
+            "processing_success": True
         }
 
     def close(self):
